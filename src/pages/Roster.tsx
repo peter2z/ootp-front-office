@@ -58,7 +58,11 @@ export function RosterPage({ orgId }: { orgId: number }) {
     <div>
       {error && <div className="banner error">{error}</div>}
       <div className="toolbar">
-        <select value={teamId ?? ''} onChange={(e) => setTeamId(e.target.value ? Number(e.target.value) : null)}>
+        <select
+          value={teamId ?? ''}
+          onChange={(e) => setTeamId(e.target.value ? Number(e.target.value) : null)}
+          aria-label="Club"
+        >
           {orgTeams.map((t) => (
             <option key={t.team_id} value={t.team_id}>
               {teamLabel(t)}
@@ -76,7 +80,9 @@ export function RosterPage({ orgId }: { orgId: number }) {
               </button>
             </div>
             <div className="col-picker-wrap">
-              <button onClick={() => setPickerOpen((v) => !v)}>⚙ Columns</button>
+              <button onClick={() => setPickerOpen((v) => !v)} aria-haspopup="dialog" aria-expanded={pickerOpen}>
+                ⚙ Columns
+              </button>
               {pickerOpen && (
                 <ColumnPicker
                   group={tab}
@@ -122,6 +128,7 @@ function RosterTable({
   const arrow = (key: string) => (key === sortKey ? (sortDir === 1 ? ' ▲' : ' ▼') : '');
 
   return (
+    <div className="table-scroll">
     <table>
       <thead>
         <tr>
@@ -215,6 +222,7 @@ function RosterTable({
         )}
       </tbody>
     </table>
+    </div>
   );
 }
 

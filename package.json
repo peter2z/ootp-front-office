@@ -9,7 +9,7 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite",
     "build": "vite build",
-    "start": "npm run build && NODE_ENV=production tsx server/index.ts",
+    "start": "npm run build && node scripts/start.mjs",
     "check:theme": "tsx scripts/check-theme-contrast.ts",
     "check:stats": "tsx scripts/check-stats.ts",
     "desktop:build": "npm run build && node scripts/build-desktop.mjs",

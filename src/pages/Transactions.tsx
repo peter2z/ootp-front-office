@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { apiGet } from '../api';
 import { PlayerLink } from '../playerModal';
 
@@ -11,7 +11,25 @@ interface Transaction {
   plain: string;
   yours: boolean;
 }
-interface Feed { transactions: Transaction[]; yours: number; available: boolean }
+interface Feed {
+  transactions: Transaction[];
+  /** Of the deals in this answer. */
+  yours: number;
+  available: boolean;
+  /** Whether older deals exist beyond what has been read so far. */
+  hasMore: boolean;
+}
+
+/** The date box has no rule of its own in the stylesheet; this is the look the other controls have. */
+const DATE_BOX: CSSProperties = {
+  background: 'var(--panel)',
+  color: 'var(--text)',
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  padding: '6px 10px',
+  fontSize: 13,
+  fontFamily: 'inherit',
+};
 
 const KIND_LABEL: Record<Transaction['kind'], string> = {
   trade: 'Trade',
@@ -46,12 +64,64 @@ export function Transactions({ orgId }: { orgId: number }) {
   const [error, setError] = useState<string | null>(null);
   const [mine, setMine] = useState(false);
   const [kind, setKind] = useState<'all' | Transaction['kind']>('all');
+  /*
+   * The day the feed is cut off at, kept with the club it was chosen for so
+   * that another club starts at its newest deal with nothing to reset.
+   */
+  const [pick, setPick] = useState({ org: orgId, date: '' });
+  const before = pick.org === orgId ? pick.date : '';
+  const [busy, setBusy] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  /*
+   * Bumped whenever the feed being read changes, so that an answer to a
+   * question asked before the club or the date changed is dropped instead of
+   * being added to the new feed.
+   */
+  const version = useRef(0);
+  const dateQuery = before ? `before=${before}` : '';
 
+  // Another club is another feed. A new date keeps the old one on screen until
+  // the answer arrives, so the date box is not unmounted under the reader.
   useEffect(() => {
     setData(null);
-    setError(null);
-    apiGet<Feed>(`/api/transactions/${orgId}`).then(setData).catch((e) => setError(e.message));
   }, [orgId]);
+
+  useEffect(() => {
+    const asked = ++version.current;
+    setError(null);
+    setMoreError(null);
+    setBusy(true);
+    apiGet<Feed>(`/api/transactions/${orgId}${dateQuery ? `?${dateQuery}` : ''}`)
+      .then((d) => { if (asked === version.current) setData(d); })
+      .catch((e) => { if (asked === version.current) setError(e.message); })
+      .finally(() => { if (asked === version.current) setBusy(false); });
+  }, [orgId, dateQuery]);
+
+  /*
+   * The next page, added on. It asks for as many deals as it already has
+   * skipped, so what is appended starts exactly where the list stops.
+   */
+  const loadMore = () => {
+    if (!data || busy) return;
+    const asked = version.current;
+    setBusy(true);
+    setMoreError(null);
+    const query = [`offset=${data.transactions.length}`, dateQuery].filter(Boolean).join('&');
+    apiGet<Feed>(`/api/transactions/${orgId}?${query}`)
+      .then((next) => {
+        if (asked !== version.current) return;
+        setData((d) =>
+          d && {
+            ...d,
+            transactions: [...d.transactions, ...next.transactions],
+            yours: d.yours + next.yours,
+            hasMore: next.hasMore,
+          }
+        );
+      })
+      .catch((e) => { if (asked === version.current) setMoreError(e.message); })
+      .finally(() => { if (asked === version.current) setBusy(false); });
+  };
 
   const shown = useMemo(() => {
     if (!data) return [];
@@ -68,7 +138,9 @@ export function Transactions({ orgId }: { orgId: number }) {
   if (error) return <div className="banner error">{error}</div>;
   if (!data) return <p className="muted">Reading the league's paperwork…</p>;
 
-  if (data.transactions.length === 0) {
+  // A date with nothing on or before it is not an empty league: the toolbar
+  // stays, so the date can be changed
+  if (data.transactions.length === 0 && !before) {
     return (
       <div className="hint">
         <h3>No transactions in this export</h3>
@@ -120,13 +192,28 @@ export function Transactions({ orgId }: { orgId: number }) {
             ))}
           </span>
         )}
+        <label className="muted">
+          Up to{' '}
+          <input
+            type="date"
+            style={DATE_BOX}
+            value={before}
+            aria-label="Show deals up to this date"
+            onChange={(e) => setPick({ org: orgId, date: e.target.value })}
+          />
+        </label>
+        {before && <button onClick={() => setPick({ org: orgId, date: '' })}>Latest</button>}
         <span className="muted">
-          {shown.length} of {data.transactions.length}
+          {shown.length} of {data.transactions.length} loaded
         </span>
       </div>
 
-      {shown.length === 0 ? (
-        <p className="muted">Nothing matches those filters.</p>
+      {data.transactions.length === 0 ? (
+        <p className="muted">Nothing on record up to {before}.</p>
+      ) : shown.length === 0 ? (
+        <p className="muted">
+          Nothing matches those filters{data.hasMore ? ' in the deals loaded so far' : ''}.
+        </p>
       ) : (
         <table>
           <thead>
@@ -157,6 +244,21 @@ export function Transactions({ orgId }: { orgId: number }) {
             ))}
           </tbody>
         </table>
+      )}
+
+      {data.hasMore ? (
+        <p>
+          <button onClick={loadMore} disabled={busy}>
+            {busy ? 'Loading…' : 'Load older deals'}
+          </button>
+          {moreError && <span className="bad-text"> Could not load them: {moreError}</span>}
+        </p>
+      ) : (
+        data.transactions.length > 0 && (
+          <p className="muted">
+            That is every deal on record{before ? ` up to ${before}` : ''}.
+          </p>
+        )
       )}
     </div>
   );

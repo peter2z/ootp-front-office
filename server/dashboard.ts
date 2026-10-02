@@ -5,8 +5,10 @@ import { playoffPicture } from './playoffs.js';
 import { competitiveGamesSql, postseason } from './postseason.js';
 import { deadlineRead } from './posture.js';
 import { healthOf, HURT_SQL, NO_TIMETABLE } from './health.js';
-import { computeContracts } from './contracts.js';
+import { computeContracts, isExtensionAction } from './contracts.js';
 import { computeProspects } from './org.js';
+import { rosterCrunch } from './rosterops.js';
+import { probableStarters } from './schedule.js';
 
 export const dashboardRoutes = Router();
 
@@ -26,15 +28,6 @@ function playerName(id: number | null): { player_id: number; name: string; throw
     .prepare(`SELECT player_id, first_name || ' ' || last_name AS name, throws FROM players WHERE player_id = ?`)
     .get(id) as { player_id: number; name: string; throws: number } | undefined;
   return p ? { player_id: p.player_id, name: p.name, throws: HAND[p.throws] ?? '?' } : null;
-}
-
-function probableStarter(teamId: number, gameIndex: number) {
-  if (!tableExists('projected_starting_pitchers')) return null;
-  const row = db
-    .prepare(`SELECT * FROM projected_starting_pitchers WHERE team_id = ?`)
-    .get(teamId) as Record<string, number> | undefined;
-  if (!row) return null;
-  return playerName(row[`starter_${Math.min(gameIndex, 7)}`] ?? null);
 }
 
 export function nextGames(teamId: number, limit: number) {
@@ -116,23 +109,64 @@ dashboardRoutes.get('/next-game/:teamId', (req, res) => {
   const isHome = game.home_team === teamId;
   const oppId = isHome ? game.away_team : game.home_team;
   /*
-   * Slot zero, and it is not an approximation.
+   * Each club's man is found on its own schedule, and for the next game that is
+   * not always the top of its row.
    *
-   * `projected_starting_pitchers` is the rotation as it stands on the export's
-   * own date, so starter_0 is whoever pitches next — which for the next game
-   * is by definition the man. The schedule's Plan panel counts along the array
-   * because it is asked about games several days out; there is nothing to
-   * count here, and I briefly "fixed" this by importing that reckoning before
-   * working out it can only ever return zero for the next unplayed game.
+   * `projected_starting_pitchers` is a list by game, club by club: starter_0 is
+   * whoever a club pitches in the next game IT has left to play. For us that is
+   * this one, by definition. For the opponent it is this one only when they have
+   * nothing in front of it. On a day we are off while they play they have: their
+   * slot zero is tonight's game against somebody else, and the man for ours is
+   * the one after. This used to read slot zero for both, on the strength of a
+   * note here that it could only ever return zero for the next unplayed game.
+   * That holds for our own club, whose next game this is by construction; for
+   * the other side it named the man from the night before.
+   *
+   * probableStarters counts each club along its own remaining schedule, the
+   * same way the Schedule, the Game Plan and the Pitching page do, so the card
+   * the lineup page builds against his hand is built against the right man.
    */
+  const probable = probableStarters();
   res.json({
+    game_id: game.game_id,
     date: game.date,
     isHome,
     opponent: isHome ? game.away_label : game.home_label,
-    ourStarter: probableStarter(teamId, 0),
-    theirStarter: probableStarter(oppId, 0),
+    ourStarter: playerName(probable(teamId, game.game_id)),
+    theirStarter: playerName(probable(oppId, game.game_id)),
   });
 });
+
+export interface FarmSignalCounts {
+  promote: number;
+  blocked: number;
+  demote: number;
+  /** The three together: the men the farm page is asking the reader to decide about. */
+  total: number;
+}
+
+/**
+ * The farm signals that call for a decision, counted.
+ *
+ * The chip used to count every man carrying any signal at all, and most of
+ * those say `watch`: the Dodgers' 46 were 27 watch, 17 blocked and 2 demote,
+ * with not one promote, so "46 promotion signals" opened a page with nobody on
+ * it to promote. A watch only says a man is playing well. Promote, blocked and
+ * demote each ask for something — a move, or a decision about one: a blocked
+ * man has earned a call-up behind somebody graded above him — so those are
+ * what is counted, and the three counts ride along so the chip can say what
+ * its number is made of.
+ */
+export function farmSignalCounts(prospects: { batters: unknown[]; pitchers: unknown[] }): FarmSignalCounts {
+  const counts: FarmSignalCounts = { promote: 0, blocked: 0, demote: 0, total: 0 };
+  for (const p of [...prospects.batters, ...prospects.pitchers] as Array<{ signal: string | null }>) {
+    if (p.signal === 'promote' || p.signal === 'blocked' || p.signal === 'demote') {
+      counts[p.signal] += 1;
+      counts.total += 1;
+    }
+  }
+  return counts;
+}
 
 dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
   const orgId = Number(req.params.orgId);
@@ -183,16 +217,20 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
     };
   });
 
-  // Next 5 games with our probable starters (and theirs for the next game)
+  // Next 5 games with our probable starters (and theirs for the next game).
+  // Each is found on its own club's schedule, so the opponent's man is the one
+  // due for this game and not the one pitching their game before it.
+  const probable = probableStarters();
   const upcoming = nextGames(orgId, 5).map((g, i) => {
     const isHome = g.home_team === orgId;
     const oppId = isHome ? g.away_team : g.home_team;
     return {
+      game_id: g.game_id,
       date: g.date,
       isHome,
       opponent: isHome ? g.away_label : g.home_label,
-      ourStarter: probableStarter(orgId, i),
-      theirStarter: i === 0 ? probableStarter(oppId, 0) : null,
+      ourStarter: playerName(probable(orgId, g.game_id)),
+      theirStarter: i === 0 ? playerName(probable(oppId, g.game_id)) : null,
     };
   });
 
@@ -428,14 +466,11 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
     const contracts = computeContracts(orgId);
     for (const p of contracts.players as unknown as Array<{ flags: string[]; recommendation: { action: string } | null }>) {
       if (p.flags.includes('expiring')) expiring++;
-      if (p.recommendation?.action === 'Extension candidate' || p.recommendation?.action === 'Extend now') {
-        extensionCandidates++;
-      }
+      // The same test the Contracts page applies, so the chip counts what the page lists
+      if (isExtensionAction(p.recommendation?.action)) extensionCandidates++;
     }
   } catch { /* contracts table may be absent */ }
-  const prospects = computeProspects(orgId);
-  const promoteSignals = [...(prospects.batters as Array<{ signal: string | null }>), ...(prospects.pitchers as Array<{ signal: string | null }>)]
-    .filter((p) => p.signal !== null).length;
+  const farm = farmSignalCounts(computeProspects(orgId));
   const injuries = orgInjuries(orgId);
   // Distinct players your staff has raised as trade targets, so the chip counts
   // decisions to make rather than messages received
@@ -456,14 +491,13 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
         )
         .get(orgId) as { n: number }).n
     : 0;
-  const crunchIssues = tableExists('players_roster_status')
-    ? (db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM players_roster_status rs JOIN players p ON p.player_id = rs.player_id
-           WHERE p.organization_id = ? AND (rs.designated_for_assignment = 1 OR rs.is_on_waivers = 1)`
-        )
-        .get(orgId) as { n: number }).n
-    : 0;
+  /*
+   * The length of the list the Roster Crunch page shows under "Needs
+   * attention", taken from the function that builds it. This used to be a query
+   * of its own that counted only designations and waivers, so the chip read 0
+   * above a page that read 6.
+   */
+  const crunchIssues = rosterCrunch(orgId)?.counts.issues ?? 0;
 
   res.json({
     standings,
@@ -487,7 +521,8 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
     pending: {
       expiring,
       extensionCandidates,
-      promoteSignals,
+      farmSignals: farm.total,
+      farmBreakdown: { promote: farm.promote, blocked: farm.blocked, demote: farm.demote },
       injuredCount: injuries.length,
       crunchIssues,
       tradeTalk,

@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll } from 'vitest';
 import { db } from '../server/db.js';
+import { formDoubtsValue, type SeasonForm } from '../server/form.js';
 import request from './request.js';
 import { IDS } from './fixture.js';
 
@@ -18,12 +19,21 @@ import { IDS } from './fixture.js';
  * soaking up long relief rises to the top of the reliever pool whatever he
  * does with the ball. And no statistics were sent with the percentile, so
  * nothing the assistant had could contradict the word "performing".
+ *
+ * The veto that came of it is not the same size for everybody: a poor line is
+ * readable at 100 plate appearances but says little about a 24-year-old whose
+ * talent is at the 97th percentile, so the sample it takes to overrule the value
+ * figure grows with youth and talent. That rule has its own tests in
+ * contractAdvice.test.ts; the cases here are the ones where it must not let the
+ * original report back in.
  */
 
 interface Player {
   name: string;
+  age: number;
   overallPct: number | null;
-  seasonForm: { line: string | null; verdict: string; meaningful: boolean } | null;
+  talentPct: number | null;
+  seasonForm: SeasonForm | null;
   recommendation: { action: string; reasons: string[] } | null;
 }
 
@@ -95,7 +105,8 @@ describe('the contract payload', () => {
 
 describe('a recommendation to commit to a player', () => {
   const committing = new Set([
-    'Core keeper', 'Extension candidate', 'Extend now', 'Re-sign', 'Re-sign short-term',
+    'Core keeper', 'Extension candidate', 'Extend now', 'Extend (value only)', 'Re-sign',
+    'Re-sign short-term',
   ]);
 
   it('never stands on value alone without saying so', async () => {
@@ -109,19 +120,30 @@ describe('a recommendation to commit to a player', () => {
        * off a percentile that counts innings.
        */
       expect(said, `${p.name} (${rec.action}) said nothing about the season`).toMatch(
-        /backs it|too little to judge|no meaningful playing time/
+        /backs it|has not weighed in|no meaningful playing time|value figure stands/
       );
     }
   });
 
-  it('is never made for a man whose season is clearly poor', async () => {
+  it('is never made for a man whose season is clearly poor, once it is enough of one to count', async () => {
     for (const p of await players()) {
       const rec = p.recommendation;
       if (!rec || p.seasonForm?.verdict !== 'poor') continue;
+      // How much a poor line has to show depends on his age and talent; at or past that, it vetoes
+      if (!formDoubtsValue(p.seasonForm, p.age, p.talentPct).doubts) continue;
       expect(
         committing.has(rec.action),
         `${p.name} was told to be kept on ${rec.action} while hitting ${p.seasonForm.line}`
       ).toBe(false);
+    }
+  });
+
+  it('stands, and says the value figure stands, where the poor line is too small to doubt him on', async () => {
+    for (const p of await players()) {
+      const rec = p.recommendation;
+      if (!rec || p.seasonForm?.verdict !== 'poor' || !committing.has(rec.action)) continue;
+      expect(formDoubtsValue(p.seasonForm, p.age, p.talentPct).doubts, `${p.name} is held to a call he should be held off`).toBe(false);
+      expect(rec.reasons.join(' '), p.name).toMatch(/value figure stands/);
     }
   });
 

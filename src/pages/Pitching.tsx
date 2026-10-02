@@ -4,6 +4,11 @@ import { PlayerLink, Tip } from '../playerModal';
 import { daysLong, daysShort } from '../injury';
 import { findStat, formatStat, plusColor as statPlusColor } from '../stats';
 import { Th } from '../Th';
+import { MethodNote } from '../MethodNote';
+import { CopyButton } from './Lineup';
+
+/** The first thing the page's note says, and so the line shown while the note is folded. */
+const ROTATION_SOURCE = 'Rotation order comes from the save’s own projected starters.';
 
 const TIP_STAMINA =
   "OOTP's stamina rating on the same 1-100 scale as the other ratings. It drives how deep a " +
@@ -13,7 +18,7 @@ const TIP_FIP =
   'Fielding Independent Pitching — ERA rebuilt from only strikeouts, walks, and home runs.';
 const TIP_ERA_PLUS = findStat('pitching', 'eraPlus')?.desc ?? '';
 const TIP_P3D =
-  'Pitches thrown across the last three days — today, yesterday, and the day before. This is ' +
+  "Pitches thrown across the three days before tonight's game. This is " +
   'the number that decides whether an arm is really available tonight, regardless of how good ' +
   'his season line looks.';
 const TIP_REST = 'Days since this pitcher last appeared in a game.';
@@ -55,12 +60,18 @@ interface Starter extends Arm {
   projected: boolean;
   nextStartInDays: number | null;
 }
-interface Reliever extends Arm {
+export interface Reliever extends Arm {
   isCloser: boolean;
   status: string;
   tone: 'ok' | 'warn' | 'bad';
   pitchesLast3: number;
   appearancesLast3: number;
+  /**
+   * Who to use in his place when he is limited or out: the best available
+   * arm, or null when nobody can go. Absent in an export made before it was
+   * sent, and then there is nothing to show.
+   */
+  instead?: { player_id: number; name: string; label: string } | null;
 }
 interface PitchingData {
   today: number | null;
@@ -73,6 +84,59 @@ interface PitchingData {
 
 const era = (v: number | null | undefined) => (v === null || v === undefined ? '' : v.toFixed(2));
 const num = (v: number | null | undefined) => (v === null || v === undefined ? '' : String(v));
+
+/** A date key (20280515) the way OOTP writes a date everywhere else in the app: 2028-5-15. */
+const keyDate = (key: number): string =>
+  `${Math.floor(key / 10000)}-${Math.floor(key / 100) % 100}-${key % 100}`;
+
+/**
+ * The bullpen as plain text, for pasting into a message, a note or a forum.
+ *
+ * One line to an arm, in the order the table has them, with what the table says
+ * about him tonight and, where he cannot go, who to use instead. It is the list
+ * the page is showing, so an arm on the injured list is in it only when the
+ * reader has chosen to see him. The stand-in carries his own availability in
+ * parentheses, because pasted away from the table nothing else says why he is
+ * the one.
+ */
+export function bullpenCard(bullpen: Reliever[], today: number | null): string {
+  const limited = bullpen.filter((p) => p.tone !== 'ok').length;
+  const lines = [
+    `Bullpen availability tonight${today === null ? '' : `, ${keyDate(today)}`}` +
+      (limited > 0 ? ` (${limited} of ${bullpen.length} limited or unavailable)` : ''),
+  ];
+  for (const p of bullpen) {
+    const tag = [p.isCloser ? 'closer' : null, p.throws === '?' ? null : `throws ${p.throws}`]
+      .filter((part): part is string => part !== null)
+      .join(', ');
+    lines.push(
+      `${p.name}${tag ? ` (${tag})` : ''} - ${p.status}` +
+        // A day-to-day man reads green on his workload; the card must not lose that he is hurt
+        (p.injury?.playable ? ` - ${p.injury.status.toLowerCase()}` : '') +
+        (p.instead ? ` - use ${p.instead.name} instead (${p.instead.label})` : '')
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * What the availability column says about a reliever: the colour that says
+ * whether he can go tonight and, beside it where he cannot, who to use instead.
+ * It names nobody when nobody can go, since the rest of the column already says
+ * so, and for an export made before the page was told who to use.
+ */
+export function Availability({ arm }: { arm: Reliever }) {
+  return (
+    <>
+      <span className={`avail avail-${arm.tone}`}>{arm.status}</span>
+      {arm.instead && (
+        <span className="muted">
+          {' '}use <PlayerLink id={arm.instead.player_id}>{arm.instead.name}</PlayerLink> instead
+        </span>
+      )}
+    </>
+  );
+}
 
 function InjuryTag({ injury }: { injury: Arm['injury'] }) {
   if (!injury) return null;
@@ -122,11 +186,12 @@ export function Pitching({ teamId }: { teamId: number }) {
 
   return (
     <div>
-      <p className="muted hint-line">
-        Rotation order comes from the save&rsquo;s own projected starters. Bullpen availability is
-        computed from actual game-by-game pitch counts, so it reflects who can really throw tonight
-        rather than who has the best season line.
-      </p>
+      <MethodNote pageKey="pitching" summary={ROTATION_SOURCE}>
+        <p className="muted hint-line">
+          {ROTATION_SOURCE} Bullpen availability is computed from actual game-by-game pitch counts,
+          so it reflects who can really throw tonight rather than who has the best season line.
+        </p>
+      </MethodNote>
 
       <section>
         <h2>Rotation</h2>
@@ -202,6 +267,15 @@ export function Pitching({ teamId }: { teamId: number }) {
               </button>
             </span>
           )}
+          {bullpen.length > 0 && (
+            <span className="subtle-count il-toggle">
+              <CopyButton
+                label="Copy bullpen plan"
+                className="link-button"
+                text={() => bullpenCard(bullpen, data.today)}
+              />
+            </span>
+          )}
         </h2>
         <table>
           <thead>
@@ -223,7 +297,7 @@ export function Pitching({ teamId }: { teamId: number }) {
             {bullpen.map((p) => (
               <tr key={p.player_id}>
                 <td className="name">
-                  {p.isCloser && <span className="role-tag">CL</span>}
+                  {p.isCloser && <><span className="role-tag">CL</span>{' '}</>}
                   <PlayerLink id={p.player_id}>{p.name}</PlayerLink>
                   <InjuryTag injury={p.injury} />
                 </td>
@@ -236,8 +310,10 @@ export function Pitching({ teamId }: { teamId: number }) {
                 <td className="num">{num(p.stats?.hld)}</td>
                 <td className="num">{p.pitchesLast3 || ''}</td>
                 <td className="num">{p.appearancesLast3 || ''}</td>
-                <td>
-                  <span className={`avail avail-${p.tone}`}>{p.status}</span>
+                {/* The cell may wrap, or the stand-in widens a column that is
+                    already the last one on a table this wide */}
+                <td className="wrap-cell">
+                  <Availability arm={p} />
                 </td>
               </tr>
             ))}

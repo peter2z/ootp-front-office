@@ -8,7 +8,7 @@ import { importCsvDir, type ImportProgress, type ImportResult } from './importer
 import { clearPendingExport, pendingExport, startWatcher } from './watcher.js';
 import { getApiKey, loadSettings } from './settings.js';
 import { useOllamaUrl } from './providers.js';
-import { orgRoutes } from './org.js';
+import { clearOrgCache, orgRoutes } from './org.js';
 import { contractRoutes } from './contracts.js';
 import { freeAgentRoutes } from './freeagents.js';
 import { lineupRoutes } from './lineup.js';
@@ -20,12 +20,15 @@ import { newspaperRoutes, startNewspaperJob } from './newspaper.js';
 import { playerRoutes } from './player.js';
 import { historyRoutes, takeSnapshot } from './history.js';
 import { clearStatCaches, computeBatting, computePitching, leagueBaseline } from './stats.js';
-import { ratingScaleMax, clearScaleCache, clearValuationCaches, valuesByPlayer } from './valuation.js';
+import {
+  ratingScaleMax, clearScaleCache, clearValuationCaches, currentGameDate, valuesByPlayer,
+} from './valuation.js';
 import { clearTwoWayCache } from './twoway.js';
 import { dashboardRoutes } from './dashboard.js';
-import { rosterOpsRoutes } from './rosterops.js';
-import { tradeRoutes } from './trade.js';
-import { contactProfiles } from './battedball.js';
+import { padDate, rosterOpsRoutes } from './rosterops.js';
+import { clearTradeCache, tradeRoutes } from './trade.js';
+import { clearBattedBallCache, contactProfiles } from './battedball.js';
+import { clearScoutingCache } from './playerfile.js';
 import { standingOf, type StandingFields } from './health.js';
 import { gameplanRoutes } from './gameplan.js';
 import { aiRoutes, startBriefingJob } from './ai.js';
@@ -140,6 +143,28 @@ function humanOrgId(): number | null {
   }
 }
 
+/**
+ * Forgets everything the server has remembered out of the database.
+ *
+ * An import replaces the league wholesale — a fresh export of the same save, or
+ * a different save altogether — so anything read from it and kept in memory is
+ * about a league that is no longer there. Every module-level cache of that kind
+ * belongs in this list. Four were missing from it: the trade desk's MLB median,
+ * the scouting peer groups, the batted-ball buckets and the farm pages' choice
+ * of grade column. A save switch ranked its players against the previous
+ * save's league until the app was restarted.
+ */
+function clearImportCaches(): void {
+  clearStatCaches(); // league baselines are per-import
+  clearValuationCaches();
+  clearScaleCache();
+  clearTwoWayCache();
+  clearTradeCache(); // the MLB median value
+  clearScoutingCache(); // the peer groups a scouting rank is taken against
+  clearBattedBallCache(); // contact buckets and the league average
+  clearOrgCache(); // which grade columns the farm pages read
+}
+
 export async function runImport(csvDir: string): Promise<void> {
   if (importState.importing) return;
   importState.importing = true;
@@ -152,8 +177,7 @@ export async function runImport(csvDir: string): Promise<void> {
     // Whatever was waiting on disk has now been read
     clearPendingExport();
     fs.writeFileSync(META_PATH, JSON.stringify(importState.lastImport));
-    clearStatCaches(); // league baselines are per-import
-    clearValuationCaches();
+    clearImportCaches();
     try {
       takeSnapshot(); // development-tracking snapshot, keyed by in-game date
     } catch (err) {
@@ -162,12 +186,13 @@ export async function runImport(csvDir: string): Promise<void> {
     console.log(
       `[import] ${importState.lastImport.tables} tables, ${importState.lastImport.rows} rows imported`
     );
-    clearScaleCache();
-    clearTwoWayCache();
     autoGenerate();
   } catch (err) {
     importState.lastError = (err as Error).message;
     console.error('[import] failed:', err);
+    // The tables are replaced one at a time, so a failure part-way leaves a
+    // changed league behind, and anything remembered meanwhile is wrong for it
+    clearImportCaches();
   } finally {
     importState.importing = false;
     importState.progress = null;
@@ -204,10 +229,38 @@ function csvExportedAt(csvDir: string): string | null {
   }
 }
 
+/**
+ * The date inside the game, in the data now loaded, as yyyy-mm-dd.
+ *
+ * The header used to carry only the export's wall-clock age — "exported 55 min
+ * ago" — which says when OOTP wrote the files and nothing about how far the
+ * league has played. After a sim the in-game date is the number to check
+ * against OOTP's own screen. It is asked the way every other page asks for it,
+ * through currentGameDate, of the league the managed club plays in (the first
+ * top-level club's when the save names no manager). Never cached: an import
+ * replaces it, and OOTP writes it unpadded, which padDate puts right.
+ */
+function leagueDate(): string | null {
+  try {
+    const orgId = humanOrgId();
+    const row = (
+      orgId !== null
+        ? db.prepare(`SELECT league_id FROM teams WHERE team_id = ?`).get(orgId)
+        : db.prepare(`SELECT league_id FROM teams WHERE level = 1 LIMIT 1`).get()
+    ) as { league_id: number } | undefined;
+    return row ? padDate(currentGameDate(row.league_id)) : null;
+  } catch {
+    // No league tables yet, or the request landed in the middle of an import
+    return null;
+  }
+}
+
 api.get('/status', (_req, res) => {
   const config = loadConfig();
   res.json({
     csvExportedAt: config.csvDir ? csvExportedAt(config.csvDir) : null,
+    /** Where the game's own calendar stands, which the export's age cannot say. */
+    leagueDate: leagueDate(),
     configured: !!config.csvDir,
     saveName: config.saveName,
     csvDir: config.csvDir,

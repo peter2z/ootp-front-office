@@ -24,9 +24,15 @@ const OPP_ARM = 9401;
 const GAME = 7700;
 
 beforeAll(() => {
+  /*
+   * The day after the fixture league's own date (2030-06-01). The rotation is a
+   * list of the games a club has left, and a game that was never played and is
+   * already behind the league is not one of them, so it takes no turn in anybody's
+   * rotation and has no probable starter to fall back to.
+   */
   db.prepare(
     `INSERT INTO games (game_id, home_team, away_team, date, played, league_id)
-     VALUES (?, ?, ?, '2026-05-01', 0, ?)`
+     VALUES (?, ?, ?, '2030-06-02', 0, ?)`
   ).run(GAME, IDS.mlbTeam, IDS.otherMlbTeam, IDS.league);
 
   // Somebody for the opponent, so the scouting half has a roster to read

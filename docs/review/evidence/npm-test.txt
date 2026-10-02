@@ -1,0 +1,31 @@
+
+> ootp-front-office@0.40.1 test
+> vitest run
+
+
+ RUN  v4.1.10 C:/Users/viris/Fun/ootp-front-office/.claude/worktrees/ootp-front-office-review-6e2879
+
+ ❯ tests/ratingDisplay.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/ratingDisplay.test.ts [ tests/ratingDisplay.test.ts ]
+Error: ENOENT: no such file or directory, scandir 'C:\C:\Users\viris\Fun\ootp-front-office\.claude\worktrees\ootp-front-office-review-6e2879\src\'
+ ❯ sources tests/ratingDisplay.test.ts:27:23
+     25|
+     26| function sources(dir: string, found: string[] = []): string[] {
+     27|   for (const entry of readdirSync(dir)) {
+       |                       ^
+     28|     const path = join(dir, entry);
+     29|     if (statSync(path).isDirectory()) sources(path, found);
+ ❯ tests/ratingDisplay.test.ts:36:17
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 80 passed (81)
+      Tests  677 passed (677)
+   Start at  09:23:19
+   Duration  102.04s (transform 1.34s, setup 38.58s, import 40.30s, tests 9.32s, environment 6ms)
+
+TEST_EXIT=1

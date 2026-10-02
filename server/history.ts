@@ -390,6 +390,49 @@ historyRoutes.get('/development/:orgId', (req, res) => {
 
 // ── Watchlist ───────────────────────────────────────────────────────────
 
+/**
+ * Puts a man on the watchlist, or updates him if he is already there.
+ *
+ * Out of the route because the page is no longer the only thing that writes
+ * here: the staff chat can watch somebody on request, and two copies of an
+ * upsert is how the two stop agreeing about what it does. It now says one thing
+ * the route only did by accident. Leaving `note` out leaves the note that is
+ * already there. The page always sends one, but the chat does not, and
+ * watching a man you have already written about must not wipe what you wrote.
+ */
+export function watchPlayer(playerId: number, name?: string | null, note?: string | null): void {
+  historyDb
+    .prepare(
+      `INSERT INTO watchlist (save_name, player_id, name, note, added_at, updated_at)
+       VALUES (@save, @player, @name, COALESCE(@note, ''), @now, @now)
+       ON CONFLICT (save_name, player_id)
+       DO UPDATE SET note = COALESCE(@note, note), name = COALESCE(@name, name), updated_at = @now`
+    )
+    .run({
+      save: currentSaveName(),
+      player: playerId,
+      name: name ?? null,
+      note: note ?? null,
+      now: new Date().toISOString(),
+    });
+}
+
+/** Whether he is on this save's watchlist now. */
+export function isWatched(playerId: number): boolean {
+  return !!historyDb
+    .prepare(`SELECT 1 FROM watchlist WHERE save_name = ? AND player_id = ?`)
+    .get(currentSaveName(), playerId);
+}
+
+/** Takes him off the watchlist. True when he was on it. */
+export function unwatchPlayer(playerId: number): boolean {
+  return (
+    historyDb
+      .prepare(`DELETE FROM watchlist WHERE save_name = ? AND player_id = ?`)
+      .run(currentSaveName(), playerId).changes > 0
+  );
+}
+
 historyRoutes.get('/watchlist', (_req, res) => {
   const rows = historyDb
     .prepare(`SELECT * FROM watchlist WHERE save_name = ? ORDER BY updated_at DESC`)
@@ -418,22 +461,12 @@ historyRoutes.get('/watchlist', (_req, res) => {
 historyRoutes.post('/watchlist', (req, res) => {
   const { player_id, name, note } = req.body as { player_id: number; name?: string; note?: string };
   if (!player_id) return res.status(400).json({ error: 'player_id required' });
-  const now = new Date().toISOString();
-  historyDb
-    .prepare(
-      `INSERT INTO watchlist (save_name, player_id, name, note, added_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (save_name, player_id)
-       DO UPDATE SET note = COALESCE(excluded.note, note), name = COALESCE(excluded.name, name), updated_at = excluded.updated_at`
-    )
-    .run(currentSaveName(), player_id, name ?? null, note ?? '', now, now);
+  watchPlayer(player_id, name, note);
   res.json({ ok: true });
 });
 
 historyRoutes.delete('/watchlist/:playerId', (req, res) => {
-  historyDb
-    .prepare(`DELETE FROM watchlist WHERE save_name = ? AND player_id = ?`)
-    .run(currentSaveName(), Number(req.params.playerId));
+  unwatchPlayer(Number(req.params.playerId));
   res.json({ ok: true });
 });
 
@@ -445,6 +478,46 @@ historyRoutes.get('/watchlist/:playerId', (req, res) => {
 });
 
 // ── Notes on a player ───────────────────────────────────────────────────
+
+/**
+ * Files a note on a man's page and returns its id.
+ *
+ * Out of the route for the same reason as the watchlist write: the chat files
+ * notes too, and the date it records has to be the game's in both cases.
+ */
+export function addPlayerNote(note: {
+  playerId: number;
+  playerName?: string | null;
+  /** Who said it. */
+  source?: string | null;
+  body: string;
+}): number {
+  const info = historyDb
+    .prepare(
+      `INSERT INTO player_notes (save_name, player_id, player_name, source, body, game_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      currentSaveName(),
+      note.playerId,
+      note.playerName ?? null,
+      note.source ?? 'You',
+      note.body.trim(),
+      // The in-game date, not today's: a plan made in May is judged against the
+      // season, and the wall clock means nothing to a save being simmed
+      leagueGameDate(),
+      new Date().toISOString()
+    );
+  return Number(info.lastInsertRowid);
+}
+
+/** The id of a note already on his page with exactly this text, if there is one. */
+export function findPlayerNote(playerId: number, body: string): number | null {
+  const row = historyDb
+    .prepare(`SELECT id FROM player_notes WHERE save_name = ? AND player_id = ? AND body = ? LIMIT 1`)
+    .get(currentSaveName(), playerId, body.trim()) as { id: number } | undefined;
+  return row?.id ?? null;
+}
 
 historyRoutes.get('/player-notes/:playerId', (req, res) => {
   const rows = historyDb
@@ -467,23 +540,8 @@ historyRoutes.post('/player-notes', (req, res) => {
   if (!Number.isFinite(Number(player_id)) || !body || !body.trim()) {
     return res.status(400).json({ error: 'A player and some text are required' });
   }
-  const info = historyDb
-    .prepare(
-      `INSERT INTO player_notes (save_name, player_id, player_name, source, body, game_date, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      currentSaveName(),
-      Number(player_id),
-      player_name ?? null,
-      source ?? 'You',
-      body.trim(),
-      // The in-game date, not today's: a plan made in May is judged against the
-      // season, and the wall clock means nothing to a save being simmed
-      leagueGameDate(),
-      new Date().toISOString()
-    );
-  res.json({ ok: true, id: info.lastInsertRowid });
+  const id = addPlayerNote({ playerId: Number(player_id), playerName: player_name, source, body });
+  res.json({ ok: true, id });
 });
 
 historyRoutes.delete('/player-notes/:id', (req, res) => {

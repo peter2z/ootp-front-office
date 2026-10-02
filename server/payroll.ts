@@ -87,6 +87,88 @@ function salaryForYear(
   return c[`salary${idx}`] ?? 0;
 }
 
+export interface ReconciliationTerm {
+  key: 'payroll' | 'deadMoney' | 'minors' | 'other';
+  amount: number;
+  /** Players the term covers, where the count is part of the explanation. */
+  players?: number;
+  /** `minors` only: what the committed total charges those players, in full. */
+  salary?: number;
+}
+
+export interface Reconciliation {
+  year: number;
+  /** This season's committed total: the first row of the chart under the cards. */
+  committed: number;
+  /**
+   * In the order they are read, and they add up to `committed`. The page prints
+   * them and adds nothing of its own, so it cannot disagree with the chart.
+   */
+  terms: ReconciliationTerm[];
+}
+
+/**
+ * Why this season's committed total is not the payroll figure beside it.
+ *
+ * They are different numbers and the difference is not noise. A club's own
+ * payroll in OOTP, set against the contracts listed here, leaves out two things:
+ *
+ *  - Money still owed to players who have left, which the game keeps outside
+ *    its payroll figure. Twenty-two clubs across three saves had some. With it
+ *    taken out, the gap to the contract sum on every one of them comes in whole
+ *    multiples of the minor-league difference below; with it left in, on none.
+ *  - Players in the minors on a major-league MINIMUM contract, whom it charges
+ *    at the minor-league wage and not at the salary on the deal: $132,000
+ *    against $800,000 in a 2028 league, $84,150 against $510,000 in a 2015 one
+ *    and $135,300 against $820,000 in a 2029 one, which is 16.5 per cent of the
+ *    minimum every time. The Dodgers have ten of them, so $668,000 each comes
+ *    to $6,680,000 off — to the dollar the amount the page had no name for.
+ *    Across those saves 59 of 92 clubs come out exactly on it, and 90 to a
+ *    whole number of such players.
+ *
+ * A share of a salary that somebody else is paying is not a term. It is already
+ * out of the committed total (see payingShare), so there is nothing to bridge.
+ *
+ * The remainder is attributed to the minimum-salary players only where they can
+ * account for it. The wage is inferred, not published, so it is not hard-coded
+ * here: a league that charges them differently leaves a different remainder and
+ * the line still adds up. It is called "other" when they cannot be the cause —
+ * nobody to blame, or a remainder larger than they cost.
+ *
+ * Null when OOTP gave no payroll figure, because there is then nothing to start
+ * the line from.
+ */
+export function reconcile(args: {
+  year: number;
+  committed: number;
+  /** OOTP's own payroll figure for this season. */
+  payroll: number | null | undefined;
+  deadMoney: { total: number; players: number };
+  /** Minimum-salary players in the minors: how many, and what they cost here in full. */
+  minors: { players: number; salary: number };
+}): Reconciliation | null {
+  const { year, committed, deadMoney, minors } = args;
+  if (typeof args.payroll !== 'number' || !Number.isFinite(args.payroll) || args.payroll <= 0) return null;
+
+  // Whole dollars, so that the terms add up exactly rather than to within a cent
+  const payroll = Math.round(args.payroll);
+  const remainder = committed - payroll - deadMoney.total;
+
+  const terms: ReconciliationTerm[] = [{ key: 'payroll', amount: payroll }];
+  if (deadMoney.total !== 0) {
+    terms.push({ key: 'deadMoney', amount: deadMoney.total, players: deadMoney.players });
+  }
+  if (remainder !== 0) {
+    const accounted = remainder > 0 && minors.players > 0 && remainder <= minors.salary;
+    terms.push(
+      accounted
+        ? { key: 'minors', amount: remainder, players: minors.players, salary: minors.salary }
+        : { key: 'other', amount: remainder }
+    );
+  }
+  return { year, committed, terms };
+}
+
 payrollRoutes.get('/payroll/:orgId', (req, res) => {
   const orgId = Number(req.params.orgId);
   if (!tableExists('players_contract')) return res.status(400).json({ error: 'No data imported yet' });
@@ -133,6 +215,7 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
     .prepare(
       `SELECT c.*, p.first_name, p.last_name, p.age, p.position, p.retired,
               p.team_id AS current_team_id, p.organization_id AS current_org,
+              (SELECT t.level FROM teams t WHERE t.team_id = p.team_id) AS current_level,
               c.retained AS retained,
               rs.mlb_service_years AS service_years, rs.mlb_service_days AS service_days
        FROM players_contract c
@@ -145,7 +228,8 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
     first_name: string; last_name: string; age: number; position: number;
     no_trade: number; last_year_team_option: number; last_year_player_option: number;
     last_year_vesting_option: number; service_years: number | null; service_days: number | null;
-    current_team_id: number; current_org: number | null; retained: number | null;
+    current_team_id: number; current_org: number | null; current_level: number | null;
+    retained: number | null;
   }>;
 
   // Signed extensions that begin after the current deal expires
@@ -183,6 +267,16 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
       const yearsAfterThis = extension
         ? Math.max(endYear - thisSeason, 0)
         : Math.max((c.years ?? 0) - completed - 1, 0);
+      /*
+       * In the minors on a major-league contract: his organization is this
+       * club's and the club he plays for is below the majors. On the minimum,
+       * that is the case OOTP's payroll charges at the minor-league wage (see
+       * reconcile). The salary compared is the one on the deal, before any
+       * share of it somebody else is paying.
+       */
+      const inMinors = c.current_org === orgId && (c.current_level ?? 1) > 1;
+      const fullNow = salaryForYear(c, thisSeason, thisSeason, extension) ?? 0;
+      const atMinimum = inMinors && rules.minimumSalary > 0 && fullNow > 0 && fullNow <= rules.minimumSalary;
       const options: string[] = [];
       if (c.last_year_team_option === 1) options.push('team option');
       if (c.last_year_player_option === 1) options.push('player option');
@@ -193,6 +287,8 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
         name: `${c.first_name} ${c.last_name}`,
         // Owed to someone who has left AND whose salary this club retained
         deadMoney: c.current_org !== orgId && (c.retained ?? 0) !== 0,
+        inMinors,
+        atMinimum,
         age: c.age,
         positionName: POSITION_NAMES[c.position] ?? '?',
         salaryNow: byYear[0] ?? 0,
@@ -228,6 +324,13 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
       players: withMoney.length,
     };
   });
+
+  // Only men the club is genuinely still paying. A departed player whose
+  // contract has already run out owes nothing and simply is not dead money,
+  // however long his old deal lingers in the export.
+  const deadOwed = players.filter((p) => p.deadMoney && p.byYear.some((v) => (v ?? 0) > 0));
+  const deadTotal = deadOwed.reduce((sum, p) => sum + (p.salaryNow ?? 0), 0);
+  const minimumInMinors = players.filter((p) => p.atMinimum && p.salaryNow > 0);
 
   const budget = finances?.budget ?? null;
   // What the owner is expected to allow next season. Only a number you have
@@ -275,18 +378,24 @@ payrollRoutes.get('/payroll/:orgId', (req, res) => {
           ownerExpectation: finances.owner_expectation ?? 0,
         }
       : null,
-    deadMoney: (() => {
-      // Only men the club is genuinely still paying. A departed player whose
-      // contract has already run out owes nothing and simply is not dead money,
-      // however long his old deal lingers in the export.
-      const owed = players.filter(
-        (p) => p.deadMoney && p.byYear.some((v) => (v ?? 0) > 0)
-      );
-      return {
-        total: owed.reduce((sum, p) => sum + (p.salaryNow ?? 0), 0),
-        players: owed.map((p) => ({ player_id: p.player_id, name: p.name, salary: p.salaryNow })),
-      };
-    })(),
+    /*
+     * What takes OOTP's payroll figure up to this season's committed total.
+     * Worked out here so that the page has nothing to add up.
+     */
+    reconciliation: reconcile({
+      year: thisSeason,
+      committed: commitments[0].total,
+      payroll: finances?.player_payroll,
+      deadMoney: { total: deadTotal, players: deadOwed.length },
+      minors: {
+        players: minimumInMinors.length,
+        salary: minimumInMinors.reduce((sum, p) => sum + p.salaryNow, 0),
+      },
+    }),
+    deadMoney: {
+      total: deadTotal,
+      players: deadOwed.map((p) => ({ player_id: p.player_id, name: p.name, salary: p.salaryNow })),
+    },
     nextSeasonBudget: nextBudget,
     commitments: commitments.map((c) => ({
       ...c,

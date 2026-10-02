@@ -45,7 +45,18 @@ interface Plan {
 
 const avg3 = (v: number | null): string => (v === null ? '—' : v.toFixed(3).replace(/^0\./, '.'));
 
-export function GamePlan({ teamId, gameId, onClose }: { teamId: number; gameId: number; onClose: () => void }) {
+export function GamePlan({ teamId, gameId, onClose, onSettled }: {
+  teamId: number;
+  gameId: number;
+  onClose: () => void;
+  /**
+   * Called once the plan and the card built for it have both arrived, or one of
+   * them has failed: the panel is as tall as it is going to be. A caller that
+   * scrolls to it wants to do that now, since the page is not tall enough to put
+   * it where it should be while it is still a line saying it is working.
+   */
+  onSettled?: () => void;
+}) {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [lineup, setLineup] = useState<LineupResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +80,12 @@ export function GamePlan({ teamId, gameId, onClose }: { teamId: number; gameId: 
     return () => { cancelled = true; };
   }, [teamId, gameId]);
 
+  // Said once per plan, when it flips: the caller's function is only how it hears
+  const settled = error !== null || (plan !== null && lineup !== null);
+  useEffect(() => {
+    if (settled) onSettled?.();
+  }, [settled]);
+
   if (error) return <div className="banner error">{error}</div>;
   if (!plan) return <p className="muted game-plan-loading">Working up a plan…</p>;
 
@@ -91,7 +108,11 @@ export function GamePlan({ teamId, gameId, onClose }: { teamId: number; gameId: 
             </span>
           </>
         ) : (
-          <span className="muted">No starter named or projected for this game yet.</span>
+          <span className="muted">
+            {plan.game.played
+              ? 'This save does not say who started this one.'
+              : 'No starter named or projected for this game yet.'}
+          </span>
         )}
       </p>
 

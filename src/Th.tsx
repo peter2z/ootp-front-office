@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { Tip } from './playerModal';
 import { define } from './glossary';
 
@@ -54,10 +54,13 @@ export function SortableTh({
 }) {
   const label = typeof children === 'string' ? children : null;
   const definition = tip ?? (label ? define(label) : undefined);
+  // The button is what takes focus here, so it carries the definition: the
+  // label inside it is not made a second stop within a button
+  const tipId = useId();
   return (
     <th className={[className, 'sortable', active ? 'sorted' : ''].filter(Boolean).join(' ')}>
-      <button type="button" onClick={onSort}>
-        {definition ? <Tip label={children} tip={definition} /> : children}
+      <button type="button" onClick={onSort} aria-describedby={definition ? tipId : undefined}>
+        {definition ? <Tip label={children} tip={definition} inControl popId={tipId} /> : children}
         {active && <span className="sort-arrow">{dir === 1 ? '▲' : '▼'}</span>}
       </button>
     </th>

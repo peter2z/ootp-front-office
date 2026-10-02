@@ -5,6 +5,16 @@ import {
 } from './api';
 
 /**
+ * The hint in the empty field. One generic path was shown on every platform, and
+ * on Windows it looks nothing like a real one, so Windows gets its own. It is a
+ * pattern and not a promise: OneDrive often moves Documents to
+ * C:\Users\<you>\OneDrive\Documents, and the list below says where we looked.
+ */
+const GENERIC_EXAMPLE = '/path/to/Your Save.lg';
+const WINDOWS_EXAMPLE =
+  'C:\\Users\\<you>\\Documents\\Out of the Park Developments\\OOTP Baseball 27\\saved_games\\<name>.lg';
+
+/**
  * Fallback for when auto-detection doesn't find the user's save — a custom OOTP
  * install, an external drive, a cloud-synced folder. Shows where we looked,
  * offers a native folder picker in the desktop app, and accepts a typed path
@@ -12,6 +22,8 @@ import {
  */
 export function FolderPicker({ onResolved }: { onResolved: (save: SaveInfo) => void }) {
   const [locations, setLocations] = useState<SearchLocation[]>([]);
+  // The server's platform, not the browser's: it is the machine that reads the path typed here
+  const [platform, setPlatform] = useState<string | null>(null);
   const [manualPath, setManualPath] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +31,12 @@ export function FolderPicker({ onResolved }: { onResolved: (save: SaveInfo) => v
   const desktop = desktopBridge();
 
   useEffect(() => {
-    getSearchLocations().then((r) => setLocations(r.locations)).catch(() => {});
+    getSearchLocations()
+      .then((r) => {
+        setLocations(r.locations);
+        setPlatform(r.platform);
+      })
+      .catch(() => {});
   }, []);
 
   const tryPath = async (candidate: string) => {
@@ -76,7 +93,7 @@ export function FolderPicker({ onResolved }: { onResolved: (save: SaveInfo) => v
         )}
         <input
           className="trade-search folder-input"
-          placeholder="/path/to/Your Save.lg"
+          placeholder={platform === 'win32' ? WINDOWS_EXAMPLE : GENERIC_EXAMPLE}
           value={manualPath}
           onChange={(e) => setManualPath(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void tryPath(manualPath)}

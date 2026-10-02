@@ -280,10 +280,12 @@ To stop the app, press `Ctrl+C` in the terminal.
 
 1. Sim in OOTP as usual
 2. When you want fresh data: **Database Tools → Global Actions → Export data to CSV files**
-3. The app notices within a few seconds and re-imports automatically
+3. The app notices the new export within about ten seconds and offers to reload it — click
+   **Refresh now** in the banner
 
-The header always shows when the data was last exported, and the **↻ Refresh** button
-forces a re-import on demand.
+The header shows the league date, which is where the game itself has got to, and when the
+data was last exported. The **↻ Refresh** button re-imports on demand, and **Settings →
+Watch for new exports** turns the banner off.
 
 Each import also snapshots every player's scout ratings into a separate database that
 survives re-imports — that's what powers the **Development** page. The more often you
@@ -293,9 +295,9 @@ export, the richer your development history gets.
 
 ## Optional: enable the AI features
 
-Four features call out to an AI service: **Storylines**, the **GM Briefing** on the
-dashboard, **AI trade verdicts** in the Trade Center, and the **staff chat**. Everything
-else works without a key.
+Five features call out to an AI service: **The Paper**, the **Daily Recap**, the **GM
+Briefing** on the dashboard, **AI trade verdicts** in the Trade Center, and the **staff
+chat** (Ask). Everything else works without a key.
 
 Four services are supported, and Settings lets you pick one:
 
@@ -307,7 +309,7 @@ Four services are supported, and Settings lets you pick one:
 | **OpenCode Zen** | [opencode.ai/auth](https://opencode.ai/auth) | A gateway rather than a laboratory: one key reaching Claude, GPT, Gemini, DeepSeek, Kimi and the rest — several of them free |
 
 1. Get a key from whichever you prefer (on the paid ones you'll need a little credit —
-   each storyline generation costs a few cents)
+   each generation costs a few cents)
 2. Open **⚙ Settings** in the app, choose the service, paste the key, and hit
    **Verify and save**
 
@@ -361,8 +363,11 @@ On Windows: install the "Desktop development with C++" workload from
 [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/), then retry.
 
 **Port 5173 or 5178 already in use**
-Something else is on those ports. Change them in
-[`vite.config.ts`](vite.config.ts) (UI) and [`server/index.ts`](server/index.ts) (API).
+Something else is on those ports. Set `OOTP_FO_PORT` to move the API when you run
+`npm start` (for example `OOTP_FO_PORT=5200 npm start`, or in PowerShell
+`$env:OOTP_FO_PORT=5200; npm start`). The UI port is in [`vite.config.ts`](vite.config.ts).
+The generic `PORT` variable is ignored on purpose: tools that set it would otherwise
+land the API on the UI's port.
 
 **A page is empty or a stat looks wrong**
 Most likely the export is stale or partial. Re-export from OOTP and hit **↻ Refresh**.

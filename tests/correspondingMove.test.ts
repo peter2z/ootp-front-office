@@ -89,13 +89,18 @@ beforeAll(() => {
   grade.run(incumbent, 70, 70, 70, 70);
   db.prepare(`INSERT INTO team_roster VALUES (?, ?, 1)`).run(IDS.mlbTeam, incumbent);
 
-  // A weaker man at the same spot: the one a call-up would actually displace
+  /*
+   * A weaker man at the same spot: the one a call-up would actually displace.
+   * Thirty, not thirty-three: a man of 33 or more graded within ten points of
+   * a call-up no longer holds him off (tests/blockedByForm.test.ts), and this
+   * file is about the grade alone.
+   */
   const weakLink = 9721;
   db.prepare(
     `INSERT INTO players (player_id, first_name, last_name, age, position, role, bats, throws,
                           uniform_number, team_id, organization_id, retired, hidden,
                           draft_eligible, college)
-     VALUES (?, 'Weak', 'Link', 33, ?, 0, 1, 1, 56, ?, ?, 0, 0, 0, 0)`
+     VALUES (?, 'Weak', 'Link', 30, ?, 0, 1, 1, 56, ?, ?, 0, 0, 0, 0)`
   ).run(weakLink, RF, IDS.mlbTeam, IDS.mlbTeam);
   grade.run(weakLink, 45, 45, 45, 45);
   db.prepare(`INSERT INTO team_roster VALUES (?, ?, 1)`).run(IDS.mlbTeam, weakLink);

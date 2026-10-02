@@ -225,3 +225,148 @@ export function plusColor(def: StatDef, value: number | null | undefined): strin
   const share = Math.round(45 + strength * 55);
   return `color-mix(in srgb, ${end} ${share}%, var(--text))`;
 }
+
+/**
+ * The colour for a 0-100 percentile, mixed from the theme's own good and bad
+ * colours towards its text colour.
+ *
+ * Contracts and the player card painted percentiles with a fixed hue and a
+ * fixed 55% lightness, which was readable on the dark theme and all but
+ * invisible on the light one: a 90th percentile came out pale green on grey at
+ * about 1.2:1. Mixing towards the text colour keeps the hint of green or red
+ * while the theme supplies the contrast, the same way plusColor does for a
+ * plus stat. The middle of the scale is left as plain text, since a 50 says
+ * nothing worth colouring.
+ */
+export function pctColor(value: number | null | undefined): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const delta = Math.max(-50, Math.min(50, value - 50));
+  const strength = Math.abs(delta) / 50;
+  if (strength < 0.12) return undefined;
+  const end = delta >= 0 ? 'var(--good)' : 'var(--bad)';
+  const share = Math.round(45 + strength * 55);
+  return `color-mix(in srgb, ${end} ${share}%, var(--text))`;
+}
+
+/*
+ * Formatting that more than one screen needs.
+ *
+ * Kept here, with the stat formats, because every page that wrote its own got
+ * a different corner of it wrong: five of them had a private money() and no two
+ * agreed about a negative, a thousand or a billion.
+ */
+
+/**
+ * Dollars, shortened: $1.2B, $16.5M, $850K, $0.
+ *
+ * Negative money is written -$16.5M. The pages formatted the size and put a
+ * dollar sign in front of whatever came out, so a club past its trade cash read
+ * "$-16.5M" on the Payroll cards, which is not how anybody writes it.
+ *
+ * The figure is rounded before the unit is chosen, not after: 999,600 is a
+ * million to one decimal place, and choosing the unit first printed it as
+ * "$1000K".
+ */
+export function formatMoney(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  const size = Math.abs(value);
+  let text: string;
+  if (Math.round(size) < 1_000) text = `$${Math.round(size)}`;
+  else if (Math.round(size / 1_000) < 1_000) text = `$${Math.round(size / 1_000)}K`;
+  else if (Math.round(size / 100_000) < 10_000) text = `$${(Math.round(size / 100_000) / 10).toFixed(1)}M`;
+  else text = `$${(Math.round(size / 100_000_000) / 10).toFixed(1)}B`;
+  // Something that rounds to nothing has no sign worth printing
+  return value < 0 && text !== '$0' ? `-${text}` : text;
+}
+
+/**
+ * 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 43rd, 112th.
+ *
+ * The suffix follows the last digit, except that eleven, twelve and thirteen —
+ * and so 111 to 113 — all take "th". "43th pct" reached the Contracts page
+ * because a percentile was dropped into a sentence with a bare "th" after it.
+ */
+export function ordinal(n: number): string {
+  const whole = Math.round(n);
+  const lastTwo = Math.abs(whole) % 100;
+  if (lastTwo >= 11 && lastTwo <= 13) return `${whole}th`;
+  return `${whole}${['th', 'st', 'nd', 'rd'][Math.abs(whole) % 10] ?? 'th'}`;
+}
+
+/** A count with its noun, so one of them never reads "1 days": plural(1, 'day') is "1 day". */
+export function plural(count: number, singular: string, many = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : many}`;
+}
+
+/**
+ * Days that make one major-league service year.
+ *
+ * server/contracts.ts holds the same figure. The two halves of the app share no
+ * module, so it is written twice and a test holds them to each other.
+ */
+export const SERVICE_DAYS_PER_YEAR = 172;
+
+/** Service time in whole days: exact where the server sent days, from years where it did not. */
+function serviceTotal(years: number | null | undefined, days?: number | null): number | null {
+  if (typeof days === 'number' && Number.isFinite(days) && days >= 0) return Math.round(days);
+  if (typeof years === 'number' && Number.isFinite(years) && years >= 0) {
+    return Math.round(years * SERVICE_DAYS_PER_YEAR);
+  }
+  return null;
+}
+
+/**
+ * Service time as baseball writes it: whole years, a point, then days. 11.027
+ * is eleven years and twenty-seven days.
+ *
+ * The Contracts page printed 11.16, which is the day count divided by 172 and
+ * which anyone who reads box scores takes for sixteen days. Sixteen hundredths
+ * of a service year is twenty-seven. The days run from 000 to 171, so what
+ * follows the point is never a decimal fraction.
+ *
+ * Exact days win where there are any. A decimal carries only the two places it
+ * was rounded to, which can leave a day count one out.
+ */
+export function formatService(years: number | null | undefined, days?: number | null): string {
+  const total = serviceTotal(years, days);
+  if (total === null) return '—';
+  const whole = Math.floor(total / SERVICE_DAYS_PER_YEAR);
+  return `${whole}.${String(total - whole * SERVICE_DAYS_PER_YEAR).padStart(3, '0')}`;
+}
+
+/**
+ * The figure above in words, for a title attribute. Empty when there is nothing
+ * to say. Said to be "about" so many days when it was worked back from a
+ * decimal, because that can be a day out and exact days cannot.
+ */
+export function describeService(years: number | null | undefined, days?: number | null): string {
+  const total = serviceTotal(years, days);
+  if (total === null) return '';
+  const whole = Math.floor(total / SERVICE_DAYS_PER_YEAR);
+  const rest = total - whole * SERVICE_DAYS_PER_YEAR;
+  const exact = typeof days === 'number' && Number.isFinite(days) && days >= 0;
+  return (
+    `${exact ? '' : 'About '}${plural(whole, 'year')}, ${plural(rest, 'day')} of major-league service. ` +
+    `A service year is ${SERVICE_DAYS_PER_YEAR} days.`
+  );
+}
+
+/** For a column header, so the notation is explained where the numbers are. */
+export const SERVICE_NOTATION =
+  'Written years.days: 11.027 is 11 years and 27 days. A service year is 172 days, so the part ' +
+  'after the point runs from 000 to 171.';
+
+/**
+ * "2028-05-15" as "Mon May 15, 2028".
+ *
+ * Built as a local date rather than parsed, since new Date('2028-05-15') is
+ * midnight GMT and so the day before for anybody west of London.
+ */
+export function leagueDay(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  const day = new Date(y, m - 1, d);
+  return `${day.toLocaleDateString(undefined, { weekday: 'short' })} ${day.toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+  })}`;
+}

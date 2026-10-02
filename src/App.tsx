@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { leagueDay } from './stats';
 import { setRatingRounding, setRatingScaleMax } from './ratingScale';
 import {
   getOrgs, getSaves, getStatus, isStaticSite, setConfig, setStaticSite, triggerImport,
@@ -40,11 +41,24 @@ import { Settings, type AppSettings } from './pages/Settings';
 import { UpdateBadge } from './Updater';
 import { Chat } from './Chat';
 import { apiGet, apiPost } from './api';
+import {
+  back, buildHash, currentRoute, isPage, navigate, usePage,
+  type Page, type ParamsIn,
+} from './route';
 
-type Page =
-  | 'dashboard' | 'newspaper' | 'recap' | 'transactions' | 'rosters' | 'depth' | 'prospects' | 'development' | 'draft' | 'franchise' | 'orgcompare'
-  | 'contracts' | 'crunch' | 'injuries' | 'freeagents' | 'trades' | 'lineup' | 'leaders'
-  | 'staff' | 'watchlist' | 'players' | 'standings' | 'pitching' | 'schedule' | 'payroll' | 'trends' | 'settings';
+/**
+ * What /api/status reports beyond the shared Status type: the league's own date,
+ * as yyyy-mm-dd, or null when the save has none to give.
+ */
+type StatusWithDate = Status & { leagueDate?: string | null };
+
+/**
+ * The pages a static export cannot serve: it has no query endpoint behind
+ * Player Search, nowhere to save a watchlist, and no settings to change. The
+ * menu leaves them out; now that a page is an address, the address has to say
+ * the same, or typing #/players into a snapshot lands on a page that only fails.
+ */
+const NOT_IN_SNAPSHOT: readonly Page[] = ['players', 'watchlist', 'settings'];
 
 /**
  * Grouped by front-office function: what you do daily (Dashboard, Storylines),
@@ -91,7 +105,7 @@ const NAV: Array<NavEntry<Page>> = [
       { page: 'recap', label: 'Daily Recap', hint: "Yesterday's games, written up" },
       { page: 'standings', label: 'Standings', hint: 'Every division, run differential' },
       { page: 'franchise', label: 'Franchise History', hint: 'Every season the club has played' },
-      { page: 'orgcompare', label: 'Org Comparison', hint: 'Your system against the other 29' },
+      { page: 'orgcompare', label: 'Org Comparison', hint: 'Your system against the rest of the league' },
       { page: 'trends', label: 'Season Trends', hint: 'Run differential and scoring curves' },
       { page: 'players', label: 'Player Search', hint: 'Search anyone in the league' },
       { page: 'draft', label: 'Draft Board', hint: 'The class, once OOTP publishes it' },
@@ -147,7 +161,11 @@ export function App() {
   const [saves, setSaves] = useState<SaveInfo[]>([]);
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [orgId, setOrgId] = useState<number | null>(null);
-  const [page, setPageState] = useState<Page>('dashboard');
+  // The page is the address (see route.ts), so a link, a bookmark and the
+  // browser's own Back and Forward all work. A snapshot cannot serve every page,
+  // though, and one it cannot serve is the dashboard
+  const routePage = usePage();
+  const page: Page = isStaticSite() && NOT_IN_SNAPSHOT.includes(routePage) ? 'dashboard' : routePage;
   /**
    * Where the reader has been, so there is a way back.
    *
@@ -157,22 +175,61 @@ export function App() {
    * comparison and wanting to return meant finding the farm page again in the
    * menus. This is a stack rather than a toggle, so several steps in still
    * unwind one at a time.
+   *
+   * The browser's history holds the steps now, and ← is its Back, which brings
+   * a page back with the filter it had. This list follows it rather than leads
+   * it: the pages behind the current one, so the button knows whether there is
+   * anywhere to go and what to call it. A step of ours puts the page just left
+   * on it; Back, from the button or from the browser, takes one off.
    */
   const [trail, setTrail] = useState<Page[]>([]);
-  const setPage = useCallback((next: Page) => {
-    setPageState((current) => {
-      // Re-selecting the page you are on is not a step worth being able to undo
-      if (current !== next) setTrail((t) => [...t, current]);
-      return next;
-    });
+  // The page last drawn, so a change of page can be told from a redraw. Empty
+  // until there is something on screen: before then the page can still change
+  // under it, as a snapshot swaps the dashboard in for one it cannot serve, and
+  // that is not a step anybody took
+  const drawn = useRef<Page | null>(null);
+  const loaded = status !== null;
+  useEffect(() => {
+    if (!loaded) return;
+    const current = drawn.current;
+    drawn.current = page;
+    if (current === null || current === page) return;
+    const { action } = currentRoute();
+    if (action === 'push') {
+      setTrail((t) => [...t, current]);
+    } else if (action === 'pop' && trail[trail.length - 1] === page) {
+      // Back: the page returned to is no longer behind us
+      setTrail((t) => t.slice(0, -1));
+    } else if (action === 'pop') {
+      // Forward, an address typed in, or a jump of several entries that the list
+      // cannot follow: the page just left is behind us either way
+      setTrail((t) => [...t, current]);
+    }
+  }, [page, loaded]);
+  // The address should say what is on screen. A first load has none, a typed one
+  // can name a page that is not there, and a snapshot does not serve every page.
+  // Rewritten in place, so Back never lands on an address that was only a mistake.
+  // Only when the page changes, so a browser that spells an address differently
+  // from how it was written cannot set this going round
+  useEffect(() => {
+    // Read now, not drawn from: the filter and the card are not this component's to follow
+    const here = currentRoute();
+    const params = page === here.page ? here.params : {};
+    if (window.location.hash !== buildHash(page, params, here.player)) {
+      navigate(page, params, { player: here.player, replace: true });
+    }
+  }, [page, routePage]);
+  const setPage = useCallback((next: Page, params?: ParamsIn) => {
+    // Re-selecting the page you are on is not a step worth being able to undo,
+    // so it rewrites the entry (a filter cleared, say) instead of adding one
+    navigate(next, params, { replace: next === currentRoute().page });
   }, []);
-  const goBack = useCallback(() => {
-    setTrail((t) => {
-      if (t.length === 0) return t;
-      setPageState(t[t.length - 1]);
-      return t.slice(0, -1);
-    });
-  }, []);
+  const goBack = useCallback(() => back(), []);
+  // What the pages and the player card are handed for opening another page, with
+  // the filter to open it on. A name that is not a page is ignored, not trusted
+  const go = useCallback((to: string, params?: ParamsIn) => {
+    if (isPage(to)) setPage(to, params);
+  }, [setPage]);
   const [switching, setSwitching] = useState(false);
   /** Live import progress, so a thirty-second wait is not a blank screen. */
   const [importing, setImporting] = useState<Status['importProgress']>(null);
@@ -283,6 +340,10 @@ export function App() {
     try {
       await setConfig(save.csvDir, save.name);
       await waitForImport();
+      // The address survives the reload, and with it the page. A player card
+      // does not belong to it: the number would open somebody else in this save
+      const { page: here, params } = currentRoute();
+      navigate(here, params, { replace: true });
       window.location.reload();
     } catch (e) {
       setError((e as Error).message);
@@ -306,19 +367,32 @@ export function App() {
   if (!status) return <div className="shell"><p className="muted">Loading…</p></div>;
 
   const busy = switching || status.importing;
+  const leagueDate = (status as StatusWithDate).leagueDate ?? null;
+  const exportAge = status.csvExportedAt
+    ? `data exported ${relativeTime(status.csvExportedAt)}`
+    : status.lastImport
+      ? `imported ${relativeTime(status.lastImport.finishedAt)}`
+      : 'no data yet';
   // A snapshot has no query endpoint behind Player Search and nowhere to save a
-  // watchlist, so those two entries come out of the menu entirely
+  // watchlist, so those entries come out of the menu entirely
   const navEntries = isStaticSite()
     ? NAV.map((e) =>
         e.kind === 'group'
-          ? { ...e, items: e.items.filter((i) => i.page !== 'players' && i.page !== 'watchlist') }
+          ? { ...e, items: e.items.filter((i) => !NOT_IN_SNAPSHOT.includes(i.page)) }
           : e
       )
     : NAV;
 
   return (
     <div className="shell">
-      <PlayerModal />
+      {/* The first tab stop: past the masthead, the organization picker and the
+          nav, straight to the page. A button rather than a #main link, because
+          the hash is the router's and "#main" would be read as a page */}
+      <button type="button" className="skip-link" onClick={skipToContent}>
+        Skip to content
+      </button>
+      {/* Opened by the address, so also by a bookmark: not before there is a save to look the man up in */}
+      {status.hasData && <PlayerModal onNavigate={go} />}
       {/* Only while something is actually running; the rest of the app stays
           usable behind it, since the import no longer blocks every request */}
       {(busy || importing) && <ImportBar progress={importing} />}
@@ -338,6 +412,7 @@ export function App() {
               className="org-select"
               value={orgId ?? ''}
               onChange={(e) => setOrgId(Number(e.target.value))}
+              aria-label="Organization"
             >
               {orgs.map((o) => (
                 <option key={o.team_id} value={o.team_id}>
@@ -360,6 +435,7 @@ export function App() {
               if (save) void switchSave(save);
             }}
             title="Game save"
+            aria-label="Game save"
           >
             {!status.saveName && <option value="">Select a save…</option>}
             {saves.map((s) => (
@@ -370,19 +446,22 @@ export function App() {
             ))}
           </select>
           )}
+          {/* Two different clocks. The league date is where the game itself has
+              got to, which is what to check against OOTP after a sim; the age of
+              the export is only when the files were written. */}
           <span
             className="muted freshness"
-            title={`OOTP export: ${fmtTime(status.csvExportedAt)} · imported: ${fmtTime(
-              status.lastImport?.finishedAt ?? null
-            )}`}
+            title={[
+              leagueDate && `League date: ${leagueDate}`,
+              `OOTP export: ${fmtTime(status.csvExportedAt)}`,
+              `imported: ${fmtTime(status.lastImport?.finishedAt ?? null)}`,
+            ].filter(Boolean).join(' · ')}
           >
             {busy
               ? 'Importing…'
-              : status.csvExportedAt
-                ? `data exported ${relativeTime(status.csvExportedAt)}`
-                : status.lastImport
-                  ? `imported ${relativeTime(status.lastImport.finishedAt)}`
-                  : 'no data yet'}
+              : leagueDate
+                ? `League date ${leagueDay(leagueDate)} · ${exportAge}`
+                : exportAge}
           </span>
           {!isStaticSite() && (
             <button onClick={hardRefresh} disabled={busy || !status.configured}>
@@ -417,7 +496,7 @@ export function App() {
             </button>
           )}
           {status.hasData && trail.length > 0 && (
-            <button className="gear" onClick={goBack} title={`Back to ${trail[trail.length - 1]}`}>
+            <button className="gear" onClick={goBack} title={`Back to ${trail[trail.length - 1]}`} aria-label="Back">
               ←
             </button>
           )}
@@ -426,6 +505,7 @@ export function App() {
               className={`gear ${page === 'settings' ? 'active' : ''}`}
               onClick={() => setPage('settings')}
               title="Settings"
+              aria-label="Settings"
             >
               ⚙
             </button>
@@ -452,7 +532,7 @@ export function App() {
       ) : (
         <>
           <Nav entries={navEntries} current={page} onNavigate={setPage} />
-          <main>
+          <main tabIndex={-1}>
             {orgId !== null && org && (
               /*
                * Keyed by page so leaving a broken one and coming back gets a
@@ -460,13 +540,13 @@ export function App() {
                * boundary never re-rendered.
                */
               <PageBoundary key={page} onLeave={() => setPage('dashboard')}>
-                {page === 'dashboard' && <Dashboard orgId={orgId} onNavigate={(p) => setPage(p as Page)} />}
+                {page === 'dashboard' && <Dashboard orgId={orgId} onNavigate={go} />}
                 {page === 'newspaper' && <Newspaper orgId={orgId} />}
                 {page === 'recap' && <LeagueRecap orgId={orgId} />}
                 {page === 'transactions' && <Transactions orgId={orgId} />}
                 {page === 'rosters' && <RosterPage orgId={orgId} />}
                 {page === 'depth' && <DepthChart orgId={orgId} />}
-                {page === 'prospects' && <Prospects orgId={orgId} />}
+                {page === 'prospects' && <Prospects orgId={orgId} onNavigate={go} />}
                 {page === 'development' && <Development orgId={orgId} />}
                 {page === 'draft' && <Draft orgId={orgId} />}
                 {page === 'franchise' && <Franchise orgId={orgId} />}
@@ -513,7 +593,7 @@ export function App() {
               >
                 <header className="chat-head">
                   <strong>Front Office</strong>
-                  <button className="chat-close" onClick={() => setChatOpen(false)} title="Close">
+                  <button className="chat-close" onClick={() => setChatOpen(false)} title="Close chat" aria-label="Close chat">
                     ✕
                   </button>
                 </header>
@@ -529,7 +609,7 @@ export function App() {
 
 function SavePicker({ saves, onPick, busy }: { saves: SaveInfo[]; onPick: (s: SaveInfo) => void; busy: boolean }) {
   return (
-    <main>
+    <main tabIndex={-1}>
       <h2>Pick a save</h2>
       {saves.length === 0 && <p className="muted">No OOTP 27 saves detected on this machine.</p>}
       <div className="save-list">
@@ -551,8 +631,8 @@ function SavePicker({ saves, onPick, busy }: { saves: SaveInfo[]; onPick: (s: Sa
         <h3>No export yet?</h3>
         <p>
           In OOTP: open your save, then <strong>Database Tools → Global Actions → Export data to CSV files</strong>.
-          Come back here and the save card will light up. After that, re-export any time you sim — this app picks up
-          changes automatically.
+          Come back here and the save card will light up. After that, re-export any time you sim — the app notices
+          a new export and offers to reload.
         </p>
       </div>
 
@@ -562,6 +642,12 @@ function SavePicker({ saves, onPick, busy }: { saves: SaveInfo[]; onPick: (s: Sa
 }
 
 const fmtTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never');
+
+/** Focus goes to the page itself, and the next Tab to the first thing on it. */
+function skipToContent(): void {
+  document.querySelector('main')?.focus();
+}
+
 
 function relativeTime(iso: string): string {
   const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);

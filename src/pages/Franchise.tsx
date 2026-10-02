@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet } from '../api';
 import { PlayerLink } from '../playerModal';
+import { formatMoney } from '../stats';
 import { Th } from '../Th';
 
 interface Season {
@@ -27,16 +28,16 @@ interface FranchiseData {
 }
 
 const pct3 = (v: number): string => v.toFixed(3).replace(/^0\./, '.');
-const money = (v: number | null): string => {
-  if (!v) return '';
-  return Math.abs(v) >= 1_000_000 ? `$${(v / 1_000_000).toFixed(0)}M` : `$${Math.round(v / 1000)}K`;
-};
+// Blank for nothing, since a zero in this table means "no figure" rather than "$0"
+const money = (v: number | null): string => (v ? formatMoney(v) : '');
 
 interface Tenure {
   seasons: Array<{
     year: number; club: string; w: number; l: number; pct: number | null;
     finish: number; gb: number | null;
     madePlayoffs: boolean; wonPlayoffs: boolean; fired: boolean;
+    /** The line is the club's, because OOTP holds no games under the manager's name. */
+    clubRecord?: boolean;
   }>;
   totals: { seasons: number; w: number; l: number; playoffs: number; titles: number; pct: number | null };
 }
@@ -84,6 +85,8 @@ export function Franchise({ orgId }: { orgId: number }) {
   const s = data.summary;
   const peak = Math.max(...data.seasons.map((x) => x.w), 1);
   const shown = data.seasons.slice(0, limit);
+  // Seasons whose record is the club's rather than the manager's own
+  const clubYears = (tenure?.seasons ?? []).filter((t) => t.clubRecord).map((t) => t.year);
 
   return (
     <div>
@@ -124,7 +127,10 @@ export function Franchise({ orgId }: { orgId: number }) {
                 <tr key={`${t.year}-${t.club}`}>
                   <td>{t.year}</td>
                   <td>{t.club}</td>
-                  <td className="num">{t.w}-{t.l}</td>
+                  <td className="num">
+                    {t.w}-{t.l}
+                    {t.clubRecord && <span title="The club's record for the year">*</span>}
+                  </td>
                   <td className="num">{t.pct !== null ? t.pct.toFixed(3).replace(/^0\./, '.') : '—'}</td>
                   <td className="num">{t.finish || '—'}</td>
                   <td className="num">{t.gb ? t.gb : '—'}</td>
@@ -137,6 +143,12 @@ export function Franchise({ orgId }: { orgId: number }) {
               ))}
             </tbody>
           </table>
+          {clubYears.length > 0 && (
+            <p className="muted hint-line">
+              * {clubYears.join(', ')}: the club&rsquo;s record. OOTP has no games under your name
+              for {clubYears.length === 1 ? 'that season' : 'those seasons'}.
+            </p>
+          )}
         </section>
       )}
 

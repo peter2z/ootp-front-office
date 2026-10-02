@@ -8,6 +8,8 @@ export interface SaveInfo {
 
 export interface Status {
   csvExportedAt: string | null;
+  /** The game's own calendar date in the loaded data, yyyy-mm-dd; null before any import. */
+  leagueDate?: string | null;
   /** True when running as a static export rather than against a live server. */
   exportedSite?: boolean;
   exportedAt?: string;
@@ -229,6 +231,19 @@ export interface PlayerDossier {
   uniform: number | null;
   team: string | null;
   serviceYears: number | null;
+  /** Exact major-league service in days, where the export carries it; the years figure is rounded. */
+  serviceDays?: number | null;
+  /** Where he stands on the roster rules: the 40-man, the active list, options, the 60-day IL. */
+  rosterStatus?: {
+    on40: boolean;
+    on26: boolean;
+    il60: boolean;
+    optionsUsed: number | null;
+    optionsLeft: number | null;
+    outOfOptions: boolean;
+    /** His organisation's 40-man count against its limit; null when the export has no roster table. */
+    fortyMan: { count: number; limit: number } | null;
+  } | null;
   overallPct: number | null;
   talentPct: number | null;
   /** OOTP's own Overall / Potential on the 20-80 scale, for cross-reference. */
@@ -368,6 +383,12 @@ export interface Prospect {
     bestAhead: { player_id: number; name: string; cur: number | null } | null;
     blocked: boolean;
     note: string;
+    /** For a call-up of a man not on the 40-man: the count, and who would come off if it is full. */
+    fortyMan?: {
+      count: number;
+      limit: number;
+      comesOff: { player_id: number; name: string; why: string } | null;
+    } | null;
   } | null;
   war: number;
   // batters
@@ -406,9 +427,21 @@ export interface ContractRow {
   yearsAfterThis: number;
   endYear: number;
   serviceYears: number | null;
+  /** Exact major-league service in days, where the export carries it; the years figure is rounded. */
+  serviceDays?: number | null;
   overallPct: number | null;
   talentPct: number | null;
   flags: string[];
+  /** 1 reaching free agency, 2 arbitration, 3 a call to make, 4 nothing to decide. */
+  urgencyTier?: 1 | 2 | 3 | 4;
+  /** Position in the page's default order: urgency tier, then value within it. */
+  urgencyRank?: number;
+  /** One line for a row with no action, so no cell is blank. */
+  noActionReason?: string | null;
+  /** Suggested years and average annual value from comparable deals in the save. */
+  terms?: { years: number | null; aav: number | null; comparables: number; basis: string } | null;
+  /** The in-game point by which the decision matters. */
+  deadline?: { kind: 'free-agency' | 'arbitration' | 'none'; afterSeason: number | null; label: string };
   /** Present only when a signed extension starts after the current deal. */
   extension: { years: number; startYear: number; endYear: number; firstSalary: number } | null;
   recommendation: { action: string; reasons: string[] } | null;
@@ -429,7 +462,10 @@ export interface FreeAgentRow {
   team: string | null;
   overallPct: number | null;
   talentPct: number | null;
+  /** Under contract, what he is paid now; on the market, what he was paid last. */
   lastSalary: number | null;
+  /** Whether signing him would patch one of the club's three thinnest positions. */
+  fillsHole: boolean;
 }
 
 export interface FreeAgentsResponse {
@@ -437,6 +473,10 @@ export interface FreeAgentsResponse {
   holes: Array<{ position: number; positionName: string; bestValue: number | null }>;
   currentFAs: FreeAgentRow[];
   upcomingFAs: FreeAgentRow[];
+  /** Draft-eligible amateurs OOTP lists as without a club, left off the market list. */
+  amateursLeftOut: number;
+  /** Message when the league has no free agency (reserve clause). */
+  rulesNote?: string;
 }
 
 export interface LineupSlot {

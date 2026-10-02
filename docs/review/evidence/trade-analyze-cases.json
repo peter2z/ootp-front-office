@@ -1,0 +1,95 @@
+{
+ "1for1_Freeland_for_Jung": {
+  "sideA": {
+   "players": [
+    {
+     "player_id": 35502,
+     "name": "Alex Freeland",
+     "age": 26,
+     "positionName": "SS",
+     "team": "Los Angeles Dodgers",
+     "overallPct": 64,
+     "talentPct": 74,
+     "salaryNow": 800000,
+     "yearsAfterThis": 0
+    }
+   ],
+   "totalValue": 1150,
+   "totalTalent": 1352,
+   "totalSalary": 800000
+  },
+  "sideB": {
+   "players": [
+    {
+     "player_id": 24617,
+     "name": "Josh Jung",
+     "age": 30,
+     "positionName": "3B",
+     "team": "Texas Rangers",
+     "overallPct": 80,
+     "talentPct": 82,
+     "salaryNow": 10000000,
+     "yearsAfterThis": 2
+    }
+   ],
+   "totalValue": 1296,
+   "totalTalent": 1454,
+   "totalSalary": 10000000
+  },
+  "valueDiff": -146,
+  "talentDiff": -102,
+  "salaryDiff": -9200000
+ },
+ "2for1_Jung_for_Mauricio+Forrest": {
+  "sideA": {
+   "players": [
+    {
+     "player_id": 24617,
+     "name": "Josh Jung",
+     "age": 30,
+     "positionName": "3B",
+     "team": "Texas Rangers",
+     "overallPct": 80,
+     "talentPct": 82,
+     "salaryNow": 10000000,
+     "yearsAfterThis": 2
+    }
+   ],
+   "totalValue": 1296,
+   "totalTalent": 1454,
+   "totalSalary": 10000000
+  },
+  "sideB": {
+   "players": [
+    {
+     "player_id": 21897,
+     "name": "Ronny Mauricio",
+     "age": 27,
+     "positionName": "SS",
+     "team": "Texas Rangers",
+     "overallPct": 34,
+     "talentPct": 36,
+     "salaryNow": 3120000,
+     "yearsAfterThis": 0
+    },
+    {
+     "player_id": 133332,
+     "name": "Ted Forrest",
+     "age": 17,
+     "positionName": "CF",
+     "team": "Texas Rangers",
+     "overallPct": 0,
+     "talentPct": 5,
+     "salaryNow": 0,
+     "yearsAfterThis": 0
+    }
+   ],
+   "totalValue": 1394,
+   "totalTalent": 2007,
+   "totalSalary": 3120000
+  },
+  "valueDiff": -98,
+  "talentDiff": -553,
+  "salaryDiff": 6880000
+ }
+}

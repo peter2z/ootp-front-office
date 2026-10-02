@@ -29,6 +29,7 @@ import { computeBatting, computePitching, leagueBaseline } from './stats.js';
  */
 const MEANINGFUL_OUTS = 60;
 const MEANINGFUL_PA = 100;
+const MEANINGFUL_IP = MEANINGFUL_OUTS / 3;
 
 /** Comfortably above the league, roughly it, and clearly below it. */
 const GOOD = 115;
@@ -42,10 +43,18 @@ export interface SeasonForm {
   /** The line itself, for the page to show and the assistants to quote. */
   line: string | null;
   verdict: 'good' | 'fair' | 'poor' | 'unknown';
+  /**
+   * How much of the season he has played, in the unit the line is written in:
+   * plate appearances for a batter, innings for a pitcher. Carried so that a
+   * rule can ask whether a sample is large enough, which the verdict alone
+   * cannot say — 'poor' covers 100 plate appearances and 600 alike.
+   */
+  sample: number;
+  unit: 'PA' | 'IP';
 }
 
 export const UNKNOWN_FORM: SeasonForm = {
-  index: null, meaningful: false, line: null, verdict: 'unknown',
+  index: null, meaningful: false, line: null, verdict: 'unknown', sample: 0, unit: 'PA',
 };
 
 /** ".248/.343/.392", written the way a slash line is written. */
@@ -63,6 +72,69 @@ const verdictOf = (index: number | null, meaningful: boolean): SeasonForm['verdi
   if (index >= FAIR) return 'fair';
   return 'poor';
 };
+
+/**
+ * Whether a poor season line is entitled to overrule the Value figure yet.
+ *
+ * "Poor" is a verdict about the line, and it arrives at 100 plate appearances or
+ * 20 innings, which is where a line becomes readable at all. It does not arrive
+ * with the evidence to doubt a man. At 125 plate appearances the standard error
+ * of a wRC+ is about 30 points (a plate appearance is worth a standard deviation
+ * of roughly .5 in wOBA), so an 82 is under one standard error below an average
+ * hitter and about one and a half below a 130 one: a bad month, not a verdict.
+ * At 400 plate appearances the error is about 18. Over 20 innings the standard
+ * error of an ERA+ is nearly 50 points, and over 80 it is about 25.
+ *
+ * Jackson Holliday, 24 years old, 96th percentile in value and 97th in talent,
+ * was told to "hold off" on 125 plate appearances of .227/.320/.327. Nothing
+ * about that line separates him from the player his ratings describe.
+ *
+ * How much it takes depends on how much the ratings deserve to be believed over
+ * the line, which is a matter of two things:
+ *
+ *   age       a young player's ratings are the best guide to where he is going and
+ *             a cold spell is the likelier explanation; an old one is declining
+ *             and the line is part of the evidence for that
+ *   talent    the higher the talent percentile, the further the true level is
+ *             from the poor line and the longer a bad stretch can run unexplained
+ *
+ * Each multiplies the meaningful sample (100 PA, 20 IP):
+ *
+ *   age     25 or under x2    26-28 x1.5    29-32 x1    33 or over x0.75
+ *   talent  90th pct up x2    75th x1.5     50th x1.25  25th x1    below x0.75
+ *
+ * and the product is held between one and four: a poor line is never ignored
+ * once it is readable, and nobody is protected for more than four times that —
+ * 400 plate appearances, 80 innings — which is most of a season for a hitter and
+ * more than most relievers throw in one. The worked cases:
+ *
+ *   24 years old, 97th pct talent    400 PA    80 IP
+ *   27, 80th                         225       45
+ *   30, 60th                         125       25
+ *   33, 40th                         100       20
+ *   37, 73rd                         100       20
+ *
+ * These are judgments, not a fit. They are here so that the judgment is made in
+ * one place, in the open, and can be moved by changing numbers rather than logic.
+ *
+ * Returns what the line needed as well as whether it got there, in the unit the
+ * line is written in, so the page can say "400 PA" and not just "more".
+ */
+export function formDoubtsValue(
+  form: SeasonForm, age: number, talentPct: number | null
+): { doubts: boolean; needed: number } {
+  const youth = age <= 25 ? 2 : age <= 28 ? 1.5 : age <= 32 ? 1 : 0.75;
+  const promise =
+    talentPct === null ? 1
+    : talentPct >= 90 ? 2
+    : talentPct >= 75 ? 1.5
+    : talentPct >= 50 ? 1.25
+    : talentPct >= 25 ? 1
+    : 0.75;
+  const multiple = Math.min(Math.max(youth * promise, 1), 4);
+  const needed = Math.round((form.unit === 'PA' ? MEANINGFUL_PA : MEANINGFUL_IP) * multiple);
+  return { doubts: form.verdict === 'poor' && form.sample >= needed, needed };
+}
 
 /**
  * This season's form for everyone on a club, at that club's own level.
@@ -118,6 +190,7 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
       const stats = computePitching(row, base, teamId);
       const meaningful = (row.outs ?? 0) >= MEANINGFUL_OUTS;
       const index = stats.eraPlus ?? null;
+      const innings = Math.round(((row.outs ?? 0) / 3) * 10) / 10;
       // A scoreless spell has no ERA+ to report — the division has no bottom.
       // Better to leave it out than to print a dash in the middle of a line
       // somebody is going to read aloud.
@@ -131,6 +204,8 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
           index !== null ? `${index} ERA+` : null,
         ].filter(Boolean).join(', '),
         verdict: verdictOf(index, meaningful),
+        sample: innings,
+        unit: 'IP',
       });
     }
   }
@@ -161,6 +236,8 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
           index !== null ? `${index} wRC+` : null,
         ].filter(Boolean).join(', '),
         verdict: verdictOf(index, meaningful),
+        sample: row.pa ?? 0,
+        unit: 'PA',
       });
     }
   }

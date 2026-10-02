@@ -224,7 +224,9 @@ export function deadlineRead(teamId: number): DeadlineRead | null {
   // The deadline is beside the point once the games have run out
   if (!seasonOver) {
     if (deadlinePassed) reasons.push('The deadline has passed — this reads the season, not the market.');
-    else if (daysToDeadline !== null) reasons.push(`${daysToDeadline} days to the deadline.`);
+    else if (daysToDeadline !== null) {
+      reasons.push(`${daysToDeadline} ${daysToDeadline === 1 ? 'day' : 'days'} to the deadline.`);
+    }
   }
 
   const chance = `${Math.round(settledOdds * 100)}%`;

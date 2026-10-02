@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db, hasColumns, tableExists } from './db.js';
 import { contactProfiles } from './battedball.js';
 import { padDate } from './rosterops.js';
+import { probableStarters } from './schedule.js';
 
 export const gameplanRoutes = Router();
 
@@ -151,59 +152,12 @@ function scoutOpponent(oppTeamId: number) {
   return { dangerous };
 }
 
-/**
- * Which slot of the opponent's rotation this game falls on.
- *
- * The projected-starters table is not a lookup by game: it is the rotation in
- * order, `starter_0` through `starter_7`, and the schedule advances one slot
- * per remaining game in a series. This counts the opponent's unplayed games
- * ahead of this one in the same series, matching what the schedule page shows
- * so the two never disagree about who is pitching.
- *
- * A series is a run of consecutive games against the same club at the same
- * venue, which is the same rule the schedule groups by.
+/*
+ * Which man the opposing club has due for this game is not worked out here. It
+ * is probableStarters in schedule.ts, so the Plan and the Schedule's own rows
+ * cannot disagree about who is pitching: the opponent's projected rotation,
+ * counted along the opponent's own remaining schedule.
  */
-function rotationSlot(teamId: number, game: GameRow): number {
-  const all = db
-    .prepare(
-      `SELECT game_id, date, home_team, away_team, played
-       FROM games WHERE home_team = ? OR away_team = ?`
-    )
-    .all(teamId, teamId) as GameRow[];
-  const ordered = all
-    .map((g) => ({
-      ...g,
-      key: padDate(g.date) ?? '',
-      oppId: g.home_team === teamId ? g.away_team : g.home_team,
-      isHome: g.home_team === teamId,
-    }))
-    .sort((a, b) => a.key.localeCompare(b.key));
-
-  const here = ordered.findIndex((g) => g.game_id === game.game_id);
-  if (here < 0) return 0;
-  const me = ordered[here];
-
-  let start = here;
-  while (
-    start > 0 &&
-    ordered[start - 1].oppId === me.oppId &&
-    ordered[start - 1].isHome === me.isHome
-  ) {
-    start--;
-  }
-  let slot = 0;
-  for (let i = start; i < here; i++) if (ordered[i].played !== 1) slot++;
-  return slot;
-}
-
-/** One slot of a club's projected rotation, or null when it is not exported. */
-function projectedStarter(teamId: number, slot: number): number | null {
-  if (!tableExists('projected_starting_pitchers')) return null;
-  const row = db
-    .prepare(`SELECT * FROM projected_starting_pitchers WHERE team_id = ?`)
-    .get(teamId) as Record<string, number> | undefined;
-  return row ? (row[`starter_${Math.min(slot, 7)}`] || null) : null;
-}
 
 /**
  * Run one optional half of the plan, and carry on without it if it fails.
@@ -226,7 +180,9 @@ function attempt<T>(work: () => T, fallback: T, what: string): { value: T; missi
  *
  * The opposing starter is taken from the game itself when the export names
  * one, and otherwise from OOTP's projected rotation — which is the usual case
- * for a game that has not been played.
+ * for a game that has not been played. That rotation is a list by game, so the
+ * man for this one is found by counting the opponent's own games still to play
+ * up to it, and not ours, and not from the top of the series.
  */
 gameplanRoutes.get('/game-plan/:teamId/:gameId', (req, res) => {
   const teamId = Number(req.params.teamId);
@@ -262,7 +218,12 @@ gameplanRoutes.get('/game-plan/:teamId/:gameId', (req, res) => {
   // starter0 is the away side, starter1 the home side — the same mapping the
   // schedule page uses for a played game
   const namedStarter = home ? g.starter0 : g.starter1;
-  const pitcherId = namedStarter || projectedStarter(oppId, rotationSlot(teamId, g));
+  /*
+   * A game already played has no slot in the opponent's rotation, which is about
+   * the games it has left. With no starter named for it the answer is nobody,
+   * not the man the opponent has due next.
+   */
+  const pitcherId = namedStarter || probableStarters()(oppId, g.game_id);
 
   const pitcher = pitcherId
     ? (db
@@ -324,6 +285,14 @@ gameplanRoutes.get('/game-plan/:teamId/:gameId', (req, res) => {
  * keeps a row per season for the human manager — record, where he finished,
  * whether he made the playoffs, whether he was fired — and it grows by one
  * line every year you play.
+ *
+ * The first season arrives with no games in it. In a real save its row read
+ * 0 games, 0-0, .000 while naming a first-place finish and a title, and the
+ * club's own history row for that year read 162 games, 100-62. The season was
+ * never missing from the rows read here, so the fix is not in which rows are
+ * read: OOTP fills in the manager's playoff flags and finances for the year
+ * and leaves his own record at zero. Left alone, the page showed a title won
+ * in no games, and the total beneath it left the year out.
  */
 gameplanRoutes.get('/tenure/:teamId', (req, res) => {
   const teamId = Number(req.params.teamId);
@@ -359,15 +328,48 @@ gameplanRoutes.get('/tenure/:teamId', (req, res) => {
       .map((r) => [r.team_id, r.label])
   );
 
+  /*
+   * The club's own line for a year, for the season OOTP left blank.
+   *
+   * Only a finished year has one. The season in progress lives in team_record
+   * and has no row here yet, so a season that has not been played stays 0-0
+   * rather than borrowing a record from somewhere else.
+   */
+  const clubSeason =
+    tableExists('team_history_record') &&
+    hasColumns('team_history_record', 'team_id', 'year', 'g', 'w', 'l', 'pct', 'pos', 'gb')
+      ? db.prepare(
+          `SELECT g, w, l, pct, pos, gb FROM team_history_record
+           WHERE team_id = ? AND year = ? AND g > 0`
+        )
+      : null;
+
   const seasons = records.map((r) => {
     const e = byYear.get(`${r.year}:${r.team_id}`);
+    /*
+     * No games under his name at all is a blank season, not a short one. A man
+     * who took over in July has a partial record and keeps it: only the club's
+     * full year would overstate what he ran.
+     */
+    const blank = !(r.g || r.w || r.l);
+    const club = blank
+      ? (clubSeason?.get(r.team_id, r.year) as
+          | { g: number; w: number; l: number; pct: number; pos: number; gb: number }
+          | undefined)
+      : undefined;
+    const line = club ?? r;
     return {
       year: r.year,
       club: labels.get(r.team_id) ?? 'Unknown',
-      g: r.g, w: r.w, l: r.l,
-      pct: r.pct,
-      finish: r.pos,
-      gb: r.gb,
+      g: line.g, w: line.w, l: line.l,
+      pct: line.pct,
+      finish: r.pos || line.pos,
+      gb: r.gb ?? line.gb,
+      /*
+       * Said on the row, so the page can tell the reader whose record it is
+       * showing. It is the club's, for a year the export holds no games for.
+       */
+      clubRecord: club !== undefined,
       madePlayoffs: e?.made_playoffs === 1,
       wonPlayoffs: e?.won_playoffs === 1,
       fired: e?.fired === 1,

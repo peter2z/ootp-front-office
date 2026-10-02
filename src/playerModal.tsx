@@ -1,34 +1,130 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  isValidElement, useCallback, useEffect, useId, useRef, useState, type ReactNode, type Ref,
+} from 'react';
 import { apiDelete, apiGet, apiPost, getPlayer, type PlayerDossier } from './api';
 import { PlayerHover } from './playerHover';
 import { PlayerTrend } from './PlayerTrend';
 import { formatRatingPair, ratingFraction } from './ratingScale';
 import { daysLong } from './injury';
+import { describeService, formatMoney, formatService, ordinal, pctColor, plural } from './stats';
+import { back, currentRoute, entryState, navigate, usePlayer } from './route';
 
-// Tiny pub/sub so any table cell can open the player card without prop drilling
-type Listener = (id: number | null) => void;
-let listener: Listener | null = null;
+/**
+ * Open the player card from any table cell, without prop drilling.
+ *
+ * The card is the `player` in the address (see route.ts) and not state of its
+ * own, so one can be bookmarked and sent, survives a reload, and is closed by
+ * Back. It opens over whatever page is showing and takes that page's filter
+ * along. Following a man from inside a card swaps the card rather than stacking
+ * another on top, so one Back, or one ✕, closes it however far the reader has
+ * wandered through it.
+ */
 export function openPlayer(id: number): void {
-  listener?.(id);
+  const { page, params, player } = currentRoute();
+  if (player === id) return;
+  if (player === null) {
+    // Marked as the card's own entry, which is what lets closePlayer pop it
+    navigate(page, params, { player: id, state: { card: true } });
+  } else {
+    navigate(page, params, { player: id, replace: true });
+  }
 }
 
-/** Clickable player name — use anywhere a player appears. */
-export function PlayerLink({ id, children }: { id: number; children: ReactNode }) {
+/**
+ * Close the card. An entry pushed to open it is popped, so opening and closing
+ * a card leaves nothing behind in the history. One that was not pushed for it —
+ * a link, a bookmark, a typed address — has nothing to pop, and is rewritten
+ * without the player where it stands, so Back still leaves the app's own pages
+ * alone.
+ */
+export function closePlayer(): void {
+  const { page, params, player } = currentRoute();
+  if (player === null) return;
+  if (entryState()?.card === true) back();
+  else navigate(page, params, { replace: true });
+}
+
+/** The words in a piece of content as a screen reader would say them: no markup, in order. */
+function textOf(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (isValidElement<{ children?: ReactNode }>(node)) return textOf(node.props.children);
+  return '';
+}
+
+/**
+ * Clickable player name — use anywhere a player appears.
+ *
+ * What pressing it does is in its name, with his after it. A list of twenty
+ * prospects is twenty buttons, and one that says only who it is leaves the
+ * reader guessing what it will do. His visible words are inside the name, so
+ * somebody speaking to the screen can still say what they see. `name` is for a
+ * link whose words are not his name (an initial, a number), and should still
+ * contain them.
+ *
+ * It has no title attribute: that was the same words again, read out a second
+ * time after the name, and drawn over the hover card for a mouse.
+ */
+export function PlayerLink({ id, name, children }: { id: number; name?: string; children: ReactNode }) {
+  const who = (name ?? textOf(children)).replace(/\s+/g, ' ').trim();
   return (
     <PlayerHover id={id}>
-      <button className="player-link" onClick={() => openPlayer(id)} title="Open player card">
+      <button
+        className="player-link"
+        onClick={() => openPlayer(id)}
+        // The hover card hears this focus through the span around the button.
+        // When it is the card handing focus back, it should not.
+        onFocus={(e) => { if (handingFocusBack) e.stopPropagation(); }}
+        aria-label={who ? `Open player card: ${who}` : 'Open player card'}
+      >
         {children}
       </button>
     </PlayerHover>
   );
 }
 
-/** Hoverable explainer — dotted underline with a styled popup. */
-export function Tip({ label, tip }: { label: ReactNode; tip: string }) {
+/**
+ * Hoverable explainer — dotted underline with a styled popup.
+ *
+ * The words can be tabbed to, and the popup opens for a keyboard resting on
+ * them as it does for a mouse. It used to open for a mouse alone, which put the
+ * definition of every column in the app out of reach of anybody not using one.
+ * The text is the words' description, so a screen reader says it after them
+ * rather than leaving it in a box it never sees.
+ *
+ * Inside a button or a link, a sortable header say, the control already takes
+ * focus and a second stop within it would be a button inside a button. There
+ * `inControl` leaves the words alone, and the control points at the text itself
+ * through the `popId` it was given. A tip that finds itself inside one anyway,
+ * because whoever drew it did not say, comes to the same thing on mounting:
+ * it is the same fault, and one more tab stop for every column is the price.
+ */
+export function Tip({
+  label, tip, inControl = false, popId,
+}: {
+  label: ReactNode;
+  tip: string;
+  inControl?: boolean;
+  popId?: string;
+}) {
+  const own = useId();
+  const id = popId ?? own;
+  const wrap = useRef<HTMLSpanElement>(null);
+  const [found, setFound] = useState(false);
+  useEffect(() => {
+    if (!inControl && wrap.current?.closest('button, a[href], [role="button"]')) setFound(true);
+  }, [inControl]);
+  const inside = inControl || found;
   return (
-    <span className="tip">
-      {label}
-      <span className="tip-pop">{tip}</span>
+    <span className="tip" ref={wrap}>
+      <span
+        className="tip-label"
+        tabIndex={inside ? undefined : 0}
+        aria-describedby={inside ? undefined : id}
+      >
+        {label}
+      </span>
+      <span className="tip-pop" id={id} role="tooltip">{tip}</span>
     </span>
   );
 }
@@ -60,8 +156,7 @@ export const TIP_TALENT =
 export const TIP_CURPOT =
   'Current → potential scout ratings (20-80 scale), averaged across the main rating categories. 45→60 means an average-ish player today with above-average upside.';
 
-const money = (n: number) =>
-  Math.abs(n) >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${Math.round(n / 1000)}k`;
+const money = formatMoney;
 const fmt3 = (n: number | null) => (n === null ? '' : n.toFixed(3).replace(/^0/, ''));
 
 const RATING_LABELS: Record<string, string> = {
@@ -77,44 +172,200 @@ const PITCH_LABELS: Record<string, string> = {
   circlechange: 'Circle Change', knucklecurve: 'Knuckle Curve', knuckleball: 'Knuckleball',
 };
 
-export function PlayerModal() {
-  const [playerId, setPlayerId] = useState<number | null>(null);
+/**
+ * Where Tab has to be sent by hand to keep it inside the card, or null when the
+ * browser's own step already stays inside.
+ *
+ * `stops` is everything Tab can land on in the card, in order, and `at` is
+ * where focus is now. Focus anywhere that is not one of them — on the card
+ * itself, or dropped to the page behind when the thing that held it was
+ * replaced — is brought in at the end Tab was heading for.
+ *
+ * Pure, so the edges can be checked without a page.
+ */
+export function tabWrap<T>(stops: readonly T[], at: T | null, backwards: boolean): T | null {
+  if (stops.length === 0) return null;
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  if (at === null || !stops.includes(at)) return backwards ? last : first;
+  if (backwards && at === first) return last;
+  if (!backwards && at === last) return first;
+  return null;
+}
+
+const TAB_STOPS = [
+  'a[href]',
+  'button:not(:disabled)',
+  'input:not(:disabled):not([type="hidden"])',
+  'select:not(:disabled)',
+  'textarea:not(:disabled)',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/** What Tab can land on inside the card, in the order it would. */
+function tabStops(root: HTMLElement): HTMLElement[] {
+  // No boxes means not drawn: a tooltip that is not showing, a note that is shut
+  return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOPS)).filter(
+    (el) => el.getClientRects().length > 0
+  );
+}
+
+function keepTabInside(e: KeyboardEvent, dialog: HTMLElement): void {
+  const stops = tabStops(dialog);
+  if (stops.length === 0) {
+    e.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const at = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const to = tabWrap(stops, at, e.shiftKey);
+  if (to === null) return;
+  e.preventDefault();
+  to.focus();
+}
+
+/**
+ * True while the card hands focus back to the link that opened it. A link
+ * brings up its hover card whenever it takes focus, which is right for a
+ * keyboard arriving at it and wrong here: the reader has just shut a card and
+ * is looking at the page, not asking for another one over it. Every close
+ * would otherwise end with a card for the name last pressed.
+ */
+let handingFocusBack = false;
+
+/**
+ * Hands focus back to whatever had it before the card opened. Only when focus
+ * went down with the card: a reader who has already clicked on something else
+ * is where they meant to be.
+ */
+function giveFocusBack(to: HTMLElement | null): void {
+  const at = document.activeElement;
+  if (!to || !to.isConnected || (at !== null && at !== document.body)) return;
+  handingFocusBack = true;
+  try {
+    to.focus();
+  } finally {
+    handingFocusBack = false;
+  }
+}
+
+/**
+ * The card's frame: the dimmed page, the dialog on it, and the way out.
+ *
+ * Kept apart from what is in the card so that what makes it a dialog can be
+ * drawn and checked without a save to open it on. Everything that closes it
+ * from here — this button, a click on the dimmed page, Escape — goes through
+ * closePlayer, so none of them can come to differ; Back needs nothing of ours,
+ * since the card is the address.
+ *
+ * `titleId` is the heading that names the card. Until there is one, while the
+ * man loads, the card is just "Player card" rather than pointing at a heading
+ * that is not on the page yet.
+ */
+export function ModalShell({
+  titleId, dialogRef, children,
+}: {
+  titleId?: string;
+  dialogRef?: Ref<HTMLDivElement>;
+  children: ReactNode;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={closePlayer}>
+      <div
+        className="modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-label={titleId ? undefined : 'Player card'}
+        // Focusable by a script and not by Tab: where focus goes when the card
+        // opens, and where it falls back to when what held it has been replaced
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button className="modal-close" onClick={closePlayer} aria-label="Close player card">✕</button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The card can send the reader to a page — the 40-Man Roster, from the line
+ * about his place on it — when whoever mounts it says how to get there. Left
+ * out, the card still says everything and simply offers no link.
+ *
+ * While it is open it is the whole of the page to a keyboard: focus moves into
+ * it, Tab goes round inside it, and closing it by any road puts focus back on
+ * what opened it.
+ */
+export function PlayerModal({ onNavigate }: { onNavigate?: (page: string) => void }) {
+  // Drawn from the address, so Back, Forward and a bookmark all open and close it
+  const playerId = usePlayer();
   const [dossier, setDossier] = useState<PlayerDossier | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    listener = setPlayerId;
-    return () => {
-      listener = null;
-    };
-  }, []);
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const open = playerId !== null;
 
   useEffect(() => {
     if (playerId === null) return;
     setDossier(null);
     setError(null);
-    getPlayer(playerId).then(setDossier).catch((e) => setError(e.message));
+    // Back and Forward can change the man faster than the server answers, and
+    // the answer to arrive last must not be one for a man no longer on screen
+    let current = true;
+    getPlayer(playerId)
+      .then((d) => { if (current) setDossier(d); })
+      .catch((e) => { if (current) setError(e.message); });
+    return () => { current = false; };
   }, [playerId]);
 
+  // Opening and closing the card, for a keyboard: whatever had focus when it
+  // opened gets it back when it closes, whichever way it was closed
   useEffect(() => {
+    if (!open) return;
+    const at = document.activeElement;
+    const opener = at instanceof HTMLElement && at !== document.body ? at : null;
+    return () => giveFocusBack(opener);
+  }, [open]);
+
+  // Focus goes into the card on opening and stays in it. Following a man from
+  // inside the card replaces everything in it, the link just pressed included,
+  // and focus that goes with it falls to the page behind.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+  }, [playerId, dossier, error]);
+
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPlayerId(null);
+      // Escape and the ✕ are one act, so they cannot come to differ
+      if (e.key === 'Escape') closePlayer();
+      // Tab goes round inside the card: it is all there is while it is open
+      else if (e.key === 'Tab' && dialogRef.current) keepTabInside(e, dialogRef.current);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [open]);
 
   if (playerId === null) return null;
 
   return (
-    <div className="modal-backdrop" onClick={() => setPlayerId(null)}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <button className="modal-close" onClick={() => setPlayerId(null)}>✕</button>
-        {error && <div className="banner error">{error}</div>}
-        {!dossier && !error && <p className="muted">Loading player…</p>}
-        {dossier && <Dossier d={dossier} />}
-      </div>
-    </div>
+    <ModalShell titleId={dossier ? titleId : undefined} dialogRef={dialogRef}>
+      {error && <div className="banner error" role="alert">{error}</div>}
+      {!dossier && !error && <p className="muted" role="status">Loading player…</p>}
+      {dossier && (
+        <Dossier
+          d={dossier}
+          titleId={titleId}
+          // Leaving the page closes the card with it: the card belongs to the
+          // page it was opened over, and the next page has none
+          onRoster={onNavigate ? () => onNavigate('crunch') : undefined}
+        />
+      )}
+    </ModalShell>
   );
 }
 
@@ -222,7 +473,98 @@ function LevelPicker({ scope, onPick }: { scope: LevelScope; onPick: (s: LevelSc
   );
 }
 
-function Dossier({ d }: { d: PlayerDossier }) {
+/**
+ * His major-league service, said the way the Contracts page says it.
+ *
+ * The card is sent whole years only, because mlb_service_years is truncated,
+ * and writing that as years.days would claim a day count nobody sent: 11.000
+ * for a man who is 11.027. So it says the years it has, as years, until the
+ * server also sends days — and uses them as soon as it does.
+ */
+function ServiceTime({ d }: { d: PlayerDossier }) {
+  const days = (d as { serviceDays?: number | null }).serviceDays;
+  if (typeof days === 'number') {
+    return <> · <span title={describeService(null, days)}>{formatService(null, days)} MLB service</span></>;
+  }
+  if (d.serviceYears === null) return null;
+  return (
+    <> · <span title="Whole years of major-league service, rounded down.">{plural(d.serviceYears, 'yr')} MLB service</span></>
+  );
+}
+
+/**
+ * Where he stands on the 40-man, as the server sends it in `rosterStatus`.
+ * Declared here until PlayerDossier in api.ts carries it.
+ */
+interface RosterStanding {
+  on40: boolean;
+  on26: boolean;
+  /** On the 60-day IL: still listed with the 40-man, but not counted on it. */
+  il60: boolean;
+  optionsUsed: number | null;
+  optionsLeft: number | null;
+  /** All three used with under five years' service: he cannot go down without waivers. */
+  outOfOptions: boolean;
+  /** His organisation's 40-man, sent for a man in the minors. */
+  fortyMan: { count: number; limit: number } | null;
+}
+
+/**
+ * His place on the 40-man, his options, and how full the roster is.
+ *
+ * A reader following a prospect from the farm page found his ratings, his
+ * history and "0 yrs MLB service" here, and had to open the 40-Man page on his
+ * own to learn whether the man could be called up at all.
+ */
+function RosterLine({ d, onRoster }: { d: PlayerDossier; onRoster?: () => void }) {
+  const r = (d as { rosterStatus?: RosterStanding | null }).rosterStatus;
+  if (!r) return null;
+  const where = r.on26
+    ? 'Active roster'
+    : r.il60
+      ? '60-day IL, off the 40-man count'
+      : r.on40
+        ? 'On the 40-man'
+        : 'Not on the 40-man';
+  return (
+    <div className="muted">
+      {where}
+      {r.fortyMan && (
+        <>
+          {' · '}
+          <span title={`His organisation's 40-man: ${r.fortyMan.count} of ${r.fortyMan.limit} places taken. Men on the 60-day IL do not count.`}>
+            {r.fortyMan.count}/{r.fortyMan.limit}
+          </span>
+        </>
+      )}
+      {r.outOfOptions ? (
+        <>
+          {' · '}
+          <span title="All three options used, under five years' service: he cannot be sent down without clearing waivers.">
+            out of options
+          </span>
+        </>
+      ) : r.optionsLeft === 0 ? (
+        <>
+          {' · '}
+          <span title="All three options used, but with five years' service he can refuse an assignment anyway.">
+            no options left
+          </span>
+        </>
+      ) : r.optionsLeft !== null ? (
+        ` · ${plural(r.optionsLeft, 'option')} left`
+      ) : null}
+      {onRoster && (
+        <>
+          {' · '}
+          <button type="button" className="link-button" onClick={onRoster}>40-Man Roster</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Dossier({ d, titleId, onRoster }: { d: PlayerDossier; titleId: string; onRoster?: () => void }) {
   const [scope, setScope] = useState<LevelScope>('all');
   const battingYears = d.battingYears.filter((y) => inScope(y.level_id, scope));
   const pitchingYears = d.pitchingYears.filter((y) => inScope(y.level_id, scope));
@@ -243,7 +585,7 @@ function Dossier({ d }: { d: PlayerDossier }) {
     <div>
       <div className="dossier-head">
         <div>
-          <h2 className="dossier-name">
+          <h2 className="dossier-name" id={titleId}>
             {d.uniform !== null && <span className="dossier-number">#{d.uniform}</span>} {d.name}
           </h2>
           {d.nickname && <div className="dossier-nick">“{d.nickname}”</div>}
@@ -251,7 +593,8 @@ function Dossier({ d }: { d: PlayerDossier }) {
             {d.roleName ?? d.positionName} · B/T {d.bats}/{d.throws} · Age {d.age}
             {d.heightWeight ? ` · ${d.heightWeight}` : ''}
           </div>
-          <div className="muted">{d.team ?? 'No club'}{d.serviceYears !== null ? ` · ${d.serviceYears} yrs MLB service` : ''}</div>
+          <div className="muted">{d.team ?? 'No club'}<ServiceTime d={d} /></div>
+          <RosterLine d={d} onRoster={onRoster} />
           {d.currentInjury && (
             <div className="injury-note">
               🩹 {d.currentInjury.status}
@@ -365,7 +708,7 @@ function Dossier({ d }: { d: PlayerDossier }) {
             <ul className="scout-list">
               {d.scouting.tools.map((t) => (
                 <li key={t.label} className={t.good ? 'good-text' : 'bad-text'}>
-                  {t.label} <span className="muted">{t.grade} · {t.rank}th percentile</span>
+                  {t.label} <span className="muted">{t.grade} · {ordinal(t.rank)} percentile</span>
                 </li>
               ))}
             </ul>
@@ -581,7 +924,7 @@ function Dossier({ d }: { d: PlayerDossier }) {
               {(d.leagueLeader ?? []).slice(0, 12).map((l, i) => (
                 <tr key={i}>
                   <td className="num muted">{l.year}</td>
-                  <td className="num">{l.place === 1 ? '1st' : l.place === 2 ? '2nd' : '3rd'}</td>
+                  <td className="num">{ordinal(l.place)}</td>
                   <td>{l.category}</td>
                   <td className="num">{l.amount}</td>
                 </tr>
@@ -666,7 +1009,7 @@ function Dossier({ d }: { d: PlayerDossier }) {
                 {d.injuryHistory.map((h, i) => (
                   <tr key={i}>
                     <td>{h.date}</td>
-                    <td className="num">{h.length ? `${h.length} days` : '—'}</td>
+                    <td className="num">{h.length ? plural(Number(h.length), 'day') : '—'}</td>
                     <td>{h.day_to_day === 1 ? 'Day-to-day' : 'IL stint'}</td>
                   </tr>
                 ))}
@@ -744,7 +1087,7 @@ function RatingRows({
 
 function Pct({ v }: { v: number | null }) {
   if (v === null) return <span className="muted">—</span>;
-  return <span style={{ color: `hsl(${(v / 100) * 120}, 65%, 55%)` }}>{v}</span>;
+  return <span style={{ color: pctColor(v) }}>{v}</span>;
 }
 
 /**

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db, tableExists } from './db.js';
 import { countsAsBatterSql, countsAsPitcherSql } from './twoway.js';
 import { healthOf, type Health, type HealthFields } from './health.js';
-import { ON_ROSTER, usesDH, valuesByPlayer } from './valuation.js';
+import { ON_ROSTER, scaleGrade, usesDH, valuesByPlayer } from './valuation.js';
 import { computeBatting, leagueBaseline } from './stats.js';
 import { climb, expectedRuns, outcomesFrom, type BattingLine } from './runs.js';
 
@@ -52,7 +52,10 @@ export interface Candidate {
   power: number;
   eye: number;
   speed: number;
-  /** OOTP's own 20-80 rating at each position; 0 means he cannot play there. */
+  /**
+   * OOTP's own rating at each position, on whatever scale the save is set to
+   * (see scaleGrade); 0 means he cannot play there.
+   */
   defense: Record<number, number>;
   /** Filled in once he is assigned somewhere. */
   playedRating?: number;
@@ -98,12 +101,22 @@ function traditionalOrder(batters: Candidate[]): Array<{ slot: number; player: C
     pool.delete(best!);
     return best!;
   };
+  /*
+   * Power is the one rating below that is added to something which is not a
+   * rating — offensive value — so it is the one that has to be carried back
+   * onto the 20-80 grades the weights were chosen on. Speed, contact and eye
+   * are only ever set against each other, which comes out the same on any
+   * scale. Left alone, a man's power on the 1-to-5 scale added at most ten
+   * points to a value in the hundreds, and the cleanup spot went to the best
+   * bat whatever his power.
+   */
+  const grades = (rating: number): number => rating / scaleGrade(1);
   const result: Array<{ slot: number; player: Candidate; why: string }> = [];
   result.push({ slot: 1, player: take((c) => c.speed * 2 + c.eye + c.contact), why: 'table-setter — speed and on-base' });
   result.push({ slot: 2, player: take((c) => c.contact * 2 + c.eye), why: 'bat control — moves the runner' });
   result.push({ slot: 3, player: take((c) => c.rank), why: 'best all-around hitter' });
-  result.push({ slot: 4, player: take((c) => c.power * 2 + c.rank), why: 'cleanup power' });
-  result.push({ slot: 5, player: take((c) => c.power + c.rank), why: 'protection behind cleanup' });
+  result.push({ slot: 4, player: take((c) => grades(c.power) * 2 + c.rank), why: 'cleanup power' });
+  result.push({ slot: 5, player: take((c) => grades(c.power) + c.rank), why: 'protection behind cleanup' });
   for (let slot = 6; slot <= batters.length; slot++) {
     result.push({ slot, player: take((c) => c.rank), why: 'descending offense' });
   }
@@ -168,11 +181,49 @@ const FIELD_POSITIONS = [2, 6, 8, 5, 4, 9, 7, 3];
  * Offence in this save spans roughly a thousand points and the rating spans
  * sixty, so eight keeps a ten-point glove difference meaningful — about eighty
  * points — without letting defence override a real bat.
+ *
+ * This and the two numbers below are 20-80 numbers. They meet the ratings
+ * through gloveScale, which states them on the scale the save is set to.
  */
 const DEF_POINTS_PER_RATING = 8;
 
 /** A position nobody is rated at still has to be manned; this is the last resort. */
 const UNMANNED_RATING = 20;
+
+/** An average fielder, and the neutral glove the DH is scored at. */
+const AVERAGE_GLOVE = 50;
+
+interface GloveScale {
+  /** Points of offensive value one point of this save's fielding rating is worth. */
+  pointsPerRating: number;
+  /** An average fielder's rating, which is also the DH's. */
+  average: number;
+  /** What a position nobody is rated at scores a man at. */
+  unmanned: number;
+}
+
+/**
+ * The three numbers above, on this save's own scale.
+ *
+ * They were 20-80 numbers set against whatever the export held. On the
+ * 1-to-5 scale every fielder is rated between one and five, so a point of
+ * rating was worth eight points of bat where it should have been worth a
+ * hundred and twenty-eight, and the two stand-in ratings — twenty for a
+ * position nobody is rated at, fifty for the DH's neutral glove — were better
+ * than any real fielder. The best gloves sat behind better bats, and a short
+ * roster put its man at a spot nobody could field, or at DH, before it put him
+ * at his own.
+ *
+ * Read for each fill and not once at load: the scale belongs to the save, and
+ * a new import can change it.
+ */
+function gloveScale(): GloveScale {
+  return {
+    pointsPerRating: DEF_POINTS_PER_RATING / scaleGrade(1),
+    average: scaleGrade(AVERAGE_GLOVE),
+    unmanned: scaleGrade(UNMANNED_RATING),
+  };
+}
 
 /**
  * What a player is worth at a position: his bat, adjusted for how well he
@@ -185,8 +236,8 @@ const UNMANNED_RATING = 20;
  * real difference, since offensive value is whole numbers, but it settles a tie
  * in favour of the man OOTP already lists there.
  */
-function slotValue(c: Candidate, pos: number, rating: number): number {
-  return c.off + DEF_POINTS_PER_RATING * (rating - 50) + (c.position === pos ? 0.5 : 0);
+function slotValue(c: Candidate, pos: number, rating: number, glove: GloveScale): number {
+  return c.off + glove.pointsPerRating * (rating - glove.average) + (c.position === pos ? 0.5 : 0);
 }
 
 /**
@@ -213,8 +264,11 @@ export function chooseFielders(
   const anyRated = slots.map((pos) => candidates.some((c) => (c.defense[pos] ?? 0) > 0));
   const canPlay = (c: Candidate, slot: number): boolean =>
     !anyRated[slot] || (c.defense[slots[slot]] ?? 0) > 0;
+  const glove = gloveScale();
   const score = (c: Candidate, slot: number): number =>
-    slotValue(c, slots[slot], anyRated[slot] ? (c.defense[slots[slot]] ?? 0) : UNMANNED_RATING);
+    slotValue(
+      c, slots[slot], anyRated[slot] ? (c.defense[slots[slot]] ?? 0) : glove.unmanned, glove
+    );
 
   let value = new Float64Array(1 << slotCount).fill(-Infinity);
   value[0] = 0;
@@ -350,8 +404,9 @@ lineupRoutes.get('/lineup/:teamId', (req, res) => {
           2: p.d2 ?? 0, 3: p.d3 ?? 0, 4: p.d4 ?? 0, 5: p.d5 ?? 0,
           6: p.d6 ?? 0, 7: p.d7 ?? 0, 8: p.d8 ?? 0, 9: p.d9 ?? 0,
           // Anyone can DH, and nobody fields it, so it scores as a neutral
-          // glove — which makes the bat the only thing separating candidates
-          [DH_POS]: 50,
+          // glove — which makes the bat the only thing separating candidates.
+          // Neutral on this save's scale: a 50 on a 1-to-5 save is off the chart
+          [DH_POS]: scaleGrade(AVERAGE_GLOVE),
         },
       };
     });

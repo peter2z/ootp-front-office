@@ -21,9 +21,12 @@ import { IDS } from './fixture.js';
  * I also went looking for a bug here that is not one. `projected_starting_
  * pitchers` is the rotation as it stands on the export's own date, so slot zero
  * is whoever pitches next; the schedule's Plan panel counts along that array
- * only because it is asked about games days out. For the next unplayed game
- * there is nothing to count. These pin that down so the next person to think
- * it is wrong can find out cheaply.
+ * only because it is asked about games days out. For our own next unplayed
+ * game there is nothing to count. (The opponent's slot is a different matter:
+ * he is counted along his own club's remaining games, which is what
+ * server/schedule.ts's probableStarters does and tests/probableStarterSchedule
+ * covers.) These pin that down so the next person to think it is wrong can
+ * find out cheaply.
  */
 
 const OPP = IDS.otherMlbTeam;

@@ -111,6 +111,9 @@ body {
   cursor: pointer;
 }
 .org-select:focus { outline: none; }
+/* A click draws no ring on the select (above), but a keyboard has to be able to
+   see where it is, so it gets one then */
+.org-select:focus-visible { outline: 2px solid var(--team-fg); outline-offset: 3px; border-radius: 4px; }
 .org-select option { background: var(--panel); color: var(--text); font-size: 14px; }
 .org-owner-tag {
   font-family: var(--font-display);
@@ -251,6 +254,14 @@ select {
 .nav-dropdown button:hover:not(:disabled) { background: var(--panel-raised); border-left-color: var(--muted); }
 .nav-dropdown button.active { border-left-color: var(--accent); background: var(--panel); }
 .nav-dropdown button.active .nav-item-label { color: var(--accent); }
+/* The arrow keys move down this menu, and where they have got to has to show
+   the way hover shows it */
+.nav-dropdown button:focus-visible {
+  background: var(--panel-raised);
+  border-left-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .nav-item-label {
   font-family: var(--font-display);
   text-transform: uppercase;
@@ -946,6 +957,11 @@ th.sortable .tip { cursor: pointer; }
   cursor: pointer;
 }
 .col-option:hover { background: var(--panel); }
+/* The row a keyboard is on, as hover lights the one a mouse is on. Only for
+   keyboard focus: opening the picker with a click puts focus in the first box,
+   and that row should not look chosen. A rule of its own, so a browser without
+   :has() loses this and not the hover above. */
+.col-option:has(input:focus-visible) { background: var(--panel); }
 .col-option input { accent-color: var(--accent); cursor: pointer; }
 .col-option-label { font-family: var(--font-display); font-size: 13px; letter-spacing: 0.05em; }
 .col-option-desc {
@@ -972,6 +988,13 @@ th.sortable .tip { cursor: pointer; }
 .player-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 .tip { position: relative; cursor: help; border-bottom: 1px dotted var(--muted); }
+/* The words the dotted line sits under, which a keyboard can now stop on. The
+   ring is drawn round them and not round .tip, whose box would take in the popup. */
+.tip-label:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 .tip-pop {
   display: none;
   position: absolute;
@@ -993,7 +1016,14 @@ th.sortable .tip { cursor: pointer; }
   white-space: normal;
   box-shadow: 0 6px 16px rgba(0,0,0,0.5);
 }
-.tip:hover .tip-pop { display: block; }
+/* Shown for a mouse resting on the words and for a keyboard resting on them.
+   :focus-visible and not :focus-within, because a click focuses the words too
+   and a tip that opened on every click would stay open until the reader
+   clicked somewhere else. The last selector is a tip inside a button or a link
+   — a sortable header — where the control is what holds focus. */
+.tip:hover .tip-pop,
+.tip-label:focus-visible + .tip-pop,
+:is(button, a):focus-visible .tip-pop { display: block; }
 th:last-child .tip-pop, th:nth-last-child(2) .tip-pop { left: auto; right: 0; }
 
 /* ── Player modal ─────────────────────────────────────────── */
@@ -1019,6 +1049,9 @@ th:last-child .tip-pop, th:nth-last-child(2) .tip-pop { left: auto; right: 0; }
   width: min(820px, 100%);
   box-shadow: 0 12px 40px rgba(0,0,0,0.6);
 }
+/* Focus lands on the card itself when it opens. It is a place for focus to be,
+   not a control, so it draws no ring; the controls inside it still do. */
+.modal:focus { outline: none; }
 .modal-close {
   position: absolute;
   top: 12px;
@@ -2406,3 +2439,53 @@ tr.ours td:first-child { border-left: 3px solid var(--accent); }
    the round being played */
 .series.done .series-teams { color: var(--muted); }
 .series.done .series-line { color: var(--muted); }
+
+/* ── Method notes ─────────────────────────────────────────── */
+
+/* The paragraph saying how a page works, folded down to one quiet row so the
+   table is what the page opens on. The wording stays the page's own; this is
+   only the fold around it. */
+.method-note { margin: 0 0 12px; }
+.method-note-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+.method-note-toggle {
+  padding: 2px 0;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 12px;
+}
+.method-note-toggle:hover,
+.method-note-toggle:focus-visible { text-decoration: underline; }
+/* A fixed width, so the words do not shift when the arrow turns. Inline-block
+   also keeps the underline off the arrow, which is not part of the label */
+.method-note-caret { display: inline-block; width: 10px; margin-right: 6px; font-size: 10px; }
+.method-note-summary { color: var(--muted); font-size: 12px; }
+.method-note-body { margin-top: 6px; }
+/* The space under the note is the note's own: the paragraph's margin on top of
+   it made an open note twice as deep underneath as a shut one */
+.method-note-body > :last-child { margin-bottom: 0; }
+
+/* ── Skip link, scrolling tables, depth-chart names ─────────── */
+/* Off-screen until it has focus, then the first thing on the page */
+.skip-link {
+  position: absolute; left: 12px; top: -200px; z-index: 1000;
+  padding: 8px 14px; border-radius: 6px;
+  background: var(--panel); color: var(--text); border: 2px solid var(--accent);
+}
+.skip-link:focus { top: 12px; }
+main:focus { outline: none; }
+/* A table wider than the window scrolls inside its own box instead of
+   dragging the masthead and the nav sideways with it */
+.table-scroll { overflow-x: auto; }
+/* A flex item will not shrink below its content unless told it may, so a
+   long name used to run under the age and grades beside it; the cut is made
+   on the link itself, which is the box that holds the text */
+.depth-name { min-width: 0; }
+.depth-name > * { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.depth-meta { white-space: nowrap; flex: none; }

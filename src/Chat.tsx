@@ -50,7 +50,24 @@ const TOOL_LABELS: Record<string, string> = {
   get_prospects: 'reviewing prospects',
   get_leaderboards: 'checking league leaders',
   get_teams: 'looking up teams',
+  // The three that change something. Worded as what is being done, since the
+  // chip appears before the answer does
+  watch_player: 'adding to your watchlist',
+  unwatch_player: 'taking off your watchlist',
+  add_note: 'filing a note',
 };
+
+/** The tools that change something, so a run stopped after one of them keeps its trace. */
+const ACTING = new Set(['watch_player', 'unwatch_player', 'add_note']);
+
+/**
+ * Whether an answer holds the note the server writes when a run ends without
+ * having answered, "[Incomplete: ...]" in providers.ts. There is nothing in one
+ * worth filing on a player's card, so the offer to is not made. Looked for at
+ * the start of a line rather than of the answer: whatever the model wrote on the
+ * way to its lookups is kept, and the note comes after it.
+ */
+export const isIncompleteAnswer = (content: string): boolean => /(^|\n)\[Incomplete:/.test(content);
 
 interface StaffMember { id: string; name: string; role: string }
 
@@ -403,11 +420,15 @@ export function Chat({ orgId, orgLabel }: { orgId: number; orgLabel: string }) {
       } finally {
         setBusy(false);
         abortRef.current = null;
-        // Drop the placeholder if the request produced nothing at all
+        // Drop the placeholder if the request produced nothing at all. One that
+        // got as far as changing something keeps its chips: a bubble that
+        // vanishes after "adding to your watchlist" leaves a change with no
+        // sign on the screen that it was made.
         setMessages((prev) => {
           const last = prev[prev.length - 1];
-          const next =
-            last?.role === 'assistant' && !last.content.trim() ? prev.slice(0, -1) : prev;
+          const empty = last?.role === 'assistant' && !last.content.trim();
+          const acted = !!last?.tools?.some((t) => ACTING.has(t));
+          const next = empty && !acted ? prev.slice(0, -1) : prev;
           void saveHistory(orgId, persona, next);
           return next;
         });
@@ -624,7 +645,7 @@ export function Chat({ orgId, orgLabel }: { orgId: number; orgLabel: string }) {
                     </button>
                   )}
 
-                  {m.role === 'assistant' && m.content && !streaming && (
+                  {m.role === 'assistant' && m.content && !streaming && !isIncompleteAnswer(m.content) && (
                     <SaveToPlayer
                       orgId={orgId}
                       body={m.content}

@@ -1,7 +1,7 @@
-import { Router } from 'express';
-import { db, tableExists } from './db.js';
-import { LEVEL_NAMES, rosterHoles, seasonYear } from './valuation.js';
-import { DATE_KEY } from './dashboard.js';
+import { Router, type Request } from 'express';
+import { db, DATE_KEY, tableColumns, tableExists } from './db.js';
+import { SERVICE_DAYS_PER_YEAR } from './contracts.js';
+import { LEVEL_NAMES, rosterHoles, scaleGrade, seasonYear } from './valuation.js';
 
 export const rosterOpsRoutes = Router();
 
@@ -12,17 +12,77 @@ const teamLabel = `CASE WHEN t.name = t.nickname THEN t.name ELSE t.name || ' ' 
 
 // ── Roster crunch (40-man / options / Rule 5 / DFA) ─────────────────────
 
-rosterOpsRoutes.get('/roster-crunch/:orgId', (req, res) => {
-  const orgId = Number(req.params.orgId);
-  if (!tableExists('players_roster_status')) return res.status(400).json({ error: 'No roster data imported yet' });
+/** Options a man is given. Use all three and he can no longer be sent down for free. */
+const OPTIONS_ALLOWED = 3;
+
+/**
+ * Past this much major-league service a man cannot be sent down against his
+ * will, so having no options left costs the club nothing with him. Under it,
+ * it is exactly what forces a designation when the roster is full.
+ */
+const OPTION_FREE_SERVICE_YEARS = 5;
+
+export interface CrunchPlayer {
+  player_id: number;
+  name: string;
+  age: number;
+  positionName: string;
+  levelName: string;
+  on26: boolean;
+  on40: boolean;
+  /** On the 60-day injured list: listed with the 40-man, but takes no place on it. */
+  il60: boolean;
+  /** Said beside him on the 40-man list when there is something to say. */
+  note: string | null;
+  optionsUsed: number;
+  rule5Protected: number;
+  issues: string[];
+}
+
+export interface RosterCrunch {
+  counts: {
+    active: number;
+    /** Men who hold a place on the 40-man. The 60-day injured list does not. */
+    fortyMan: number;
+    /** On the 40-man list but not counted in `fortyMan`. */
+    il60: number;
+    /** Exactly the length of `issues`, which is what "Needs attention" shows. */
+    issues: number;
+  };
+  issues: CrunchPlayer[];
+  fortyMan: CrunchPlayer[];
+}
+
+/**
+ * Everything the Roster Crunch page shows, worked out in one place.
+ *
+ * The dashboard's "Roster issues" chip used to run a query of its own that
+ * counted a designation or a waiver claim and nothing else, while the page it
+ * opens listed options and Rule 5 as well: the chip said 0 and the page said 6.
+ * Both read this function now, so the chip is the length of the list it opens
+ * and cannot drift from it.
+ *
+ * Null where the export has no roster-status table at all.
+ */
+export function rosterCrunch(orgId: number): RosterCrunch | null {
+  if (!tableExists('players_roster_status')) return null;
+
+  /*
+   * Whichever of these columns this export carries. The dashboard depends on
+   * this function now, and a save that lacks one of them should lose that one
+   * flag, not the whole morning report.
+   */
+  const have = new Set(tableColumns('players_roster_status'));
+  const status = [
+    'is_active', 'is_on_secondary', 'is_on_dl', 'is_on_dl60', 'options_used',
+    'years_protected_from_rule_5', 'pro_service_years', 'mlb_service_years', 'mlb_service_days',
+    'designated_for_assignment', 'days_on_dfa_left', 'is_on_waivers', 'days_on_waivers_left',
+  ].map((c) => (have.has(c) ? `rs.${c}` : `NULL AS ${c}`));
 
   const rows = db
     .prepare(
       `SELECT p.player_id, p.first_name || ' ' || p.last_name AS name, p.age, p.position,
-              t.level, rs.is_active, rs.is_on_secondary, rs.is_on_dl, rs.is_on_dl60,
-              rs.options_used, rs.years_protected_from_rule_5, rs.pro_service_years,
-              rs.mlb_service_years, rs.designated_for_assignment, rs.days_on_dfa_left,
-              rs.is_on_waivers, rs.days_on_waivers_left
+              t.level, ${status.join(', ')}
        FROM players p
        JOIN players_roster_status rs ON rs.player_id = p.player_id
        JOIN teams t ON t.team_id = p.team_id
@@ -30,49 +90,93 @@ rosterOpsRoutes.get('/roster-crunch/:orgId', (req, res) => {
     )
     .all(orgId) as Array<Record<string, number | string | null>>;
 
-  const players = rows.map((r) => {
+  const players: CrunchPlayer[] = rows.map((r) => {
     const on26 = r.is_active === 1;
-    // Secondary roster = the 40-man; MLB-level IL players also occupy 40-man spots
+    /*
+     * A man on the 60-day list holds no place on the 40-man: the club may fill
+     * his spot the day he goes down, which is what the list is for. Counting
+     * him put eight of the thirty-two clubs in one save over the limit
+     * (Baltimore at 42 of 40) when OOTP lets none of them go past it. He stays
+     * on the list, marked, because he comes back to a roster that has to find
+     * him a place.
+     */
+    const il60 = r.is_on_dl60 === 1;
+    // Secondary roster = the 40-man; MLB-level IL players are on it as well
     const on40 =
       on26 || r.is_on_secondary === 1 ||
-      ((r.is_on_dl === 1 || r.is_on_dl60 === 1) && r.level === 1);
+      ((r.is_on_dl === 1 || il60) && r.level === 1);
     const optionsUsed = (r.options_used as number) ?? 0;
-    const outOfOptions = on40 && !on26 && optionsUsed >= 3;
+    const usedAllOptions = optionsUsed >= OPTIONS_ALLOWED;
+    // Days are exact; mlb_service_years is truncated to a whole year
+    const service =
+      typeof r.mlb_service_days === 'number'
+        ? r.mlb_service_days / SERVICE_DAYS_PER_YEAR
+        : (r.mlb_service_years as number | null) ?? 0;
+    /*
+     * A man on the 26 with every option used.
+     *
+     * This was only ever raised for men already in the minors (`!on26`), which
+     * is backwards: the one it matters for is on the big club, because he
+     * cannot be sent down without clearing waivers and so is the man a full
+     * roster forces out. In one save 255 active players had all three options
+     * used and not one carried a flag; on the Dodgers that was Phillips, Snell,
+     * Okert and Anderson.
+     *
+     * Under five years of service only. Past that a man can refuse the
+     * assignment, so of those four only Anderson, at 3.78 years, is a real
+     * constraint. It is a heads-up and not a violation: it changes neither the
+     * active nor the 40-man count.
+     */
+    const activeOutOfOptions = on26 && usedAllOptions && service < OPTION_FREE_SERVICE_YEARS;
+    const outOfOptions = on40 && !on26 && usedAllOptions;
     const rule5Protected = (r.years_protected_from_rule_5 as number) ?? 0;
     const rule5Exposed = !on40 && rule5Protected <= 0 && ((r.pro_service_years as number) ?? 0) >= 4;
     const issues: string[] = [];
     if (r.designated_for_assignment === 1) issues.push(`DFA — ${r.days_on_dfa_left ?? '?'} days to resolve`);
     if (r.is_on_waivers === 1) issues.push(`on waivers — ${r.days_on_waivers_left ?? '?'} days left`);
-    if (outOfOptions) issues.push('out of options');
+    if (activeOutOfOptions) issues.push('Out of options: cannot be sent down without clearing waivers');
+    else if (outOfOptions) issues.push('out of options');
     else if (on40 && !on26 && optionsUsed === 2) issues.push('last option year');
     if (rule5Exposed) issues.push('Rule 5 exposed');
     return {
-      player_id: r.player_id,
-      name: r.name,
-      age: r.age,
+      player_id: r.player_id as number,
+      name: r.name as string,
+      age: r.age as number,
       positionName: POSITION_NAMES[r.position as number] ?? '?',
       levelName: LEVEL_NAMES[r.level as number] ?? 'R',
       on26,
       on40,
+      il60: on40 && il60,
+      note: on40 && il60 ? 'IL-60, does not count' : null,
       optionsUsed,
       rule5Protected,
       issues,
     };
   });
 
-  const fortyMan = players.filter((p) => p.on40);
+  const listed = players.filter((p) => p.on40);
+  const counted = listed.filter((p) => !p.il60);
   const withIssues = players.filter((p) => p.issues.length > 0);
   withIssues.sort((a, b) => b.issues.length - a.issues.length);
+  // The men who count first, active ahead of the rest, then the ones who do not
+  const place = (p: CrunchPlayer): number => (p.il60 ? 2 : p.on26 ? 0 : 1);
 
-  res.json({
+  return {
     counts: {
       active: players.filter((p) => p.on26).length,
-      fortyMan: fortyMan.length,
+      fortyMan: counted.length,
+      il60: listed.length - counted.length,
       issues: withIssues.length,
     },
     issues: withIssues,
-    fortyMan: fortyMan.sort((a, b) => (a.on26 === b.on26 ? 0 : a.on26 ? -1 : 1)),
-  });
+    fortyMan: listed.sort((a, b) => place(a) - place(b)),
+  };
+}
+
+rosterOpsRoutes.get('/roster-crunch/:orgId', (req, res) => {
+  const crunch = rosterCrunch(Number(req.params.orgId));
+  if (!crunch) return res.status(400).json({ error: 'No roster data imported yet' });
+  res.json(crunch);
 });
 
 // ── Leaderboards ────────────────────────────────────────────────────────
@@ -451,6 +555,36 @@ function draftLeague(orgId: number): DraftLeague | null {
   };
 }
 
+/**
+ * The youngest a man can be and still be taken in the draft.
+ *
+ * The export does not say. Its `leagues` table has no draft-age setting (the
+ * draft columns are the switch, the pool flag, the date and the round count)
+ * and nothing else in the save carries one, so this is an assumption and not a
+ * read. It is 17 because that save's own drafts say so: 2026 and 2027 took 39
+ * seventeen-year-olds, counting age on draft day, and nobody younger. A first
+ * guess of 18 would have told the 51 high-school seniors who are 17 on draft
+ * day that they are a year away. A league that runs the draft differently would
+ * need this to come from its own settings, and this is the one place to do it.
+ *
+ * OOTP's own flag does not help here. In that save it put 81 fourteen-year-olds
+ * and 340 fifteen-year-olds in the pool, high-school freshmen and sophomores
+ * with years of school left, and the board ranked them beside the seniors.
+ */
+export const MIN_DRAFT_AGE = 17;
+
+/**
+ * Years until he is old enough to be taken: 0 once he is, never negative.
+ *
+ * Years rather than a yes or no, so a man who is next year's class reads
+ * differently from one who is three years away. An age the export left blank is
+ * not a reason to hide anybody for seventeen years, so it counts as eligible.
+ * The age it works from is his age on the export's date, not on draft day.
+ */
+export function yearsToEligibility(age: number, minAge = MIN_DRAFT_AGE): number {
+  return age > 0 ? Math.max(0, minAge - age) : 0;
+}
+
 interface Prospect {
   age: number;
   positionName: string;
@@ -475,18 +609,27 @@ function advise(p: Prospect, thin: Set<string>): { label: string; reasons: strin
   const pot = p.pot ?? 0;
   const cur = p.cur ?? 0;
   const upside = p.upside ?? 0;
-  if (pot < 45) return null;
+  /*
+   * Every cut-off here is a 20-80 grade, put through scaleGrade so it means the
+   * same on the scale the save is set to. Written as bare numbers they were
+   * wrong anywhere else: on the 1-to-5 scale no ceiling ever reached 45, so
+   * the board gave every prospect no read at all, and a gap of 15 could not
+   * occur, so nobody was ever a long wait.
+   */
+  if (pot < scaleGrade(45)) return null;
 
   const reasons: string[] = [];
   let label: string;
 
-  if (pot >= 55 && upside >= 15) {
+  if (pot >= scaleGrade(55) && upside >= scaleGrade(15)) {
     label = 'High ceiling, long wait';
-    reasons.push(`${pot} ceiling, but ${upside} points of it is still projection`);
-  } else if (upside <= 8 && cur >= 45) {
+    reasons.push(
+      `${pot} ceiling, but ${upside} ${upside === 1 ? 'point' : 'points'} of it is still projection`
+    );
+  } else if (upside <= scaleGrade(8) && cur >= scaleGrade(45)) {
     label = 'Close to ready';
     reasons.push(`already at ${cur} of a ${pot} ceiling — least development left`);
-  } else if (pot >= 52) {
+  } else if (pot >= scaleGrade(52)) {
     label = 'Everyday-regular ceiling';
     reasons.push(`${pot} ceiling`);
   } else {
@@ -505,11 +648,305 @@ function advise(p: Prospect, thin: Set<string>): { label: string; reasons: strin
   return { label, reasons };
 }
 
+/**
+ * How many of the class the board itself carries.
+ *
+ * The class in the save this was written against is two thousand seven hundred
+ * and forty-four men, and the board used to send every one of them with his
+ * scouting read attached: an 860 KB answer, drawn from in the browser a hundred
+ * rows at a time, to show a page that opens on the first five. The board is the
+ * top of the list; the rest is the pool, and is asked for by the page.
+ */
+const BOARD_SIZE = 100;
+
+/** The most a page of the pool may carry, whatever the caller asks for. */
+const POOL_PAGE_MAX = 300;
+
+/** Position groups, so "infield" does not mean typing four filters. */
+const DRAFT_GROUPS: Record<string, string[]> = {
+  C: ['C'],
+  IF: ['1B', '2B', '3B', 'SS'],
+  OF: ['LF', 'CF', 'RF'],
+  P: ['P'],
+};
+
+interface ClassProspect extends Prospect {
+  player_id: number;
+  name: string;
+  /** Years until he reaches the draft age, 0 once he has. */
+  yearsToEligibility: number;
+  bats: string;
+  throws: string;
+  speed: number | null;
+}
+
+/** A man with his place in the whole class, which a re-sorted table still reports. */
+type RankedProspect = ClassProspect & { boardRank: number };
+
+/**
+ * The whole class, read in one pass and ranked best ceiling first.
+ *
+ * Everything the board and the pool both need, so that neither has to know how
+ * a save marks its draft class — which is not the same in every save.
+ *
+ * A league whose amateurs are free-floating players — the ordinary case —
+ * has them flagged draft_eligible, and that is what to read. A league that
+ * runs its own high-school and college competitions does not: its amateurs
+ * are rostered players on school clubs, OOTP works eligibility out from
+ * their class when the draft comes round, and the flag stays at zero.
+ *
+ * A reader's export settled it. His pool players carried draft_eligible = 0
+ * with hsc_status 4 and his own league in draft_league_id, while the 123 the
+ * flag did pick out belonged, every one, to a second league's draft. So the
+ * flag is used where it says something and the school class where it does
+ * not — 4 is a high-school senior, 9 and 10 the college upperclassmen.
+ *
+ * The class rule reproduced his published pool exactly: 298 men in those
+ * classes, two of them with a career-ending injury, and OOTP's own screen
+ * said 296.
+ *
+ * One read of the players table does the work of three. It used to be asked
+ * how many men the flag found, then for the men themselves, then how many it
+ * had left out and why, and the table is a hundred and thirty-five thousand
+ * rows long, so each of those took about a tenth of a second. The men either
+ * rule could want now come back together, with the columns that tell the rules
+ * apart, and are sorted out here.
+ */
+function readClass(league: DraftLeague): {
+  ranked: RankedProspect[];
+  poolRule: 'flag' | 'class';
+  excluded: { alreadyPicked: number; otherDraft: number; unrated: number };
+} {
+  // A save that predates these two columns loses the class rule, not the board
+  const have = new Set(tableColumns('players'));
+  const bySchool = have.has('hsc_status');
+  const rows = db
+    .prepare(
+      `SELECT p.player_id, p.first_name || ' ' || p.last_name AS name, p.age, p.position, p.role,
+              p.bats, p.throws, p.college,
+              p.draft_eligible AS flagged, COALESCE(p.picked_in_draft, 0) AS picked,
+              COALESCE(p.draft_league_id, 0) AS dleague,
+              ${bySchool ? 'p.hsc_status' : 'NULL'} AS hsc,
+              ${have.has('injury_career_ending') ? 'COALESCE(p.injury_career_ending, 0)' : '0'} AS ended,
+              b.batting_ratings_overall_contact AS con, b.batting_ratings_overall_gap AS gap,
+              b.batting_ratings_overall_power AS pow, b.batting_ratings_overall_eye AS eye,
+              b.batting_ratings_overall_strikeouts AS avk, b.running_ratings_speed AS spd,
+              b.batting_ratings_talent_contact AS conP, b.batting_ratings_talent_gap AS gapP,
+              b.batting_ratings_talent_power AS powP, b.batting_ratings_talent_eye AS eyeP,
+              b.batting_ratings_talent_strikeouts AS avkP,
+              pi.pitching_ratings_overall_stuff AS stu, pi.pitching_ratings_overall_movement AS mov,
+              pi.pitching_ratings_overall_control AS ctl,
+              pi.pitching_ratings_talent_stuff AS stuP, pi.pitching_ratings_talent_movement AS movP,
+              pi.pitching_ratings_talent_control AS ctlP
+       FROM players p
+       LEFT JOIN players_batting b ON b.player_id = p.player_id
+       LEFT JOIN players_pitching pi ON pi.player_id = p.player_id
+       WHERE p.retired = 0 AND p.hidden = 0
+         AND (p.draft_eligible = 1${
+           bySchool ? ' OR (COALESCE(p.draft_league_id, 0) = ? AND p.hsc_status IN (4, 9, 10))' : ''
+         })`
+    )
+    .all(...(bySchool ? [league.league_id] : [])) as Array<Record<string, number | string | null>>;
+
+  /*
+   * Still on the board, and for THIS league's draft, by whichever rule this
+   * save answers to. The eligibility flag also stays set after a man has been
+   * taken — 185 players in one save carried both it and picked_in_draft, every
+   * one stamped with this year as his draft year — so the board went on
+   * offering men who were already gone.
+   */
+  const flagged = rows.filter((r) => r.flagged === 1);
+  const notTaken = (r: Record<string, number | string | null>) => r.picked !== 1;
+  const inThisDraft = (r: Record<string, number | string | null>) =>
+    r.dleague === 0 || r.dleague === league.league_id;
+  const byFlag = flagged.filter((r) => notTaken(r) && inThisDraft(r));
+  const poolRule = byFlag.length > 0 ? 'flag' : 'class';
+  const pool =
+    poolRule === 'flag'
+      ? byFlag
+      : rows.filter(
+          (r) =>
+            r.dleague === league.league_id && [4, 9, 10].includes(r.hsc as number) &&
+            r.ended !== 1 && notTaken(r)
+        );
+
+  const avg = (vals: Array<number | string | null>): number | null => {
+    const nums = vals.filter((v): v is number => typeof v === 'number' && v > 0);
+    return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
+  };
+  const HANDS: Record<number, string> = { 1: 'R', 2: 'L', 3: 'S' };
+  const prospects: ClassProspect[] = pool.map((r) => {
+    const isPitcher = r.position === 1;
+    const cur = isPitcher ? avg([r.stu, r.mov, r.ctl]) : avg([r.con, r.gap, r.pow, r.eye, r.avk]);
+    const pot = isPitcher
+      ? avg([r.stuP, r.movP, r.ctlP])
+      : avg([r.conP, r.gapP, r.powP, r.eyeP, r.avkP]);
+    return {
+      player_id: Number(r.player_id),
+      name: String(r.name),
+      age: Number(r.age ?? 0),
+      // Shown beside his age, and deliberately not part of the ranking below
+      yearsToEligibility: yearsToEligibility(Number(r.age ?? 0)),
+      positionName: POSITION_NAMES[r.position as number] ?? '?',
+      bats: HANDS[r.bats as number] ?? '?',
+      throws: HANDS[r.throws as number] ?? '?',
+      // hsc_status is a fine-grained class code (4 = high school, 8-10 =
+      // college years) that the export ships no lookup table for. The college
+      // flag is the part that survives translation.
+      school: r.college === 1 ? 'College' : 'HS',
+      isPitcher,
+      cur,
+      pot,
+      // How much of the ceiling is still projection rather than present
+      // ability. A big gap is upside; it is also risk.
+      upside: cur !== null && pot !== null ? pot - cur : null,
+      speed: r.spd as number | null,
+    };
+  });
+  const ranked = prospects
+    .filter((p) => p.pot !== null)
+    /*
+     * Ceiling, then present ability, then his id. The last is only there so
+     * that the order is total: pages of the pool are cut from this list on
+     * separate requests, and two men who tie on both ratings would otherwise be
+     * free to change places between one page and the next.
+     */
+    .sort((a, b) => (b.pot ?? 0) - (a.pot ?? 0) || (b.cur ?? 0) - (a.cur ?? 0) || a.player_id - b.player_id)
+    // Board rank within the whole class, kept through re-sorting so a re-sorted
+    // table can still say where a player stood on ceiling
+    .map((p, i) => ({ ...p, boardRank: i + 1 }));
+
+  return {
+    ranked,
+    poolRule,
+    /*
+     * What was left out, and why.
+     *
+     * A reader reported a board with the wrong 123 men on it and had no way to
+     * tell whether the app had never seen his draft class or had seen it and
+     * ruled it out. These counts answer that from the page itself. They are
+     * shown only when they are not zero, so a save where none of this applies
+     * reads exactly as before.
+     */
+    excluded: {
+      alreadyPicked: flagged.filter((r) => !notTaken(r)).length,
+      /*
+       * Only meaningful while the flag is what the board reads. Once it has
+       * fallen back to the school class, the men the flag picked out belong to
+       * another league's draft by definition, and saying so on this page would
+       * be reporting a fact about somebody else's club.
+       */
+      otherDraft:
+        poolRule === 'flag' ? flagged.filter((r) => notTaken(r) && !inThisDraft(r)).length : 0,
+      // Eligible, unpicked, in this draft, but carrying no scouted ceiling —
+      // there is nothing to rank him on
+      unrated: pool.length - ranked.length,
+    },
+  };
+}
+
+/** What a page of the pool is asked for: who, in what order. Paging is read separately. */
+interface PoolQuery {
+  q: string;
+  group: string | null;
+  school: 'HS' | 'College' | null;
+  maxAge: number | null;
+  minPot: number | null;
+  sort: string;
+  dir: 'asc' | 'desc';
+}
+
+/** What each column of the table orders by. A key outside this list is not a column. */
+const POOL_SORTS: Record<string, (p: RankedProspect) => number | string> = {
+  name: (p) => p.name,
+  age: (p) => p.age,
+  pos: (p) => p.positionName,
+  school: (p) => p.school,
+  cur: (p) => p.cur ?? 0,
+  upside: (p) => p.upside ?? 0,
+  boardRank: (p) => p.boardRank,
+  pot: (p) => p.pot ?? 0,
+};
+
+function readPoolQuery(query: Request['query']): PoolQuery {
+  const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const number = (v: unknown): number | null => {
+    const s = text(v);
+    return s !== '' && Number.isFinite(Number(s)) ? Number(s) : null;
+  };
+  const sort = Object.hasOwn(POOL_SORTS, text(query.sort)) ? text(query.sort) : 'pot';
+  // Ratings read best high-first; name, age and rank read best low-first
+  const natural = sort === 'name' || sort === 'age' || sort === 'boardRank' ? 'asc' : 'desc';
+  const dir = text(query.dir);
+  return {
+    q: text(query.q),
+    group: Object.hasOwn(DRAFT_GROUPS, text(query.group)) ? text(query.group) : null,
+    school: text(query.school) === 'HS' || text(query.school) === 'College'
+      ? (text(query.school) as 'HS' | 'College')
+      : null,
+    maxAge: number(query.maxAge),
+    minPot: number(query.minPot),
+    sort,
+    dir: dir === 'asc' || dir === 'desc' ? dir : natural,
+  };
+}
+
+/**
+ * The men a query leaves, in the order it asks for.
+ *
+ * What the page did to the class in the browser, now done where the class
+ * is. Sorting what had been loaded would have ordered a page and not the
+ * class — the best arm in the draft could sit on a page nobody had asked
+ * for — so the whole pool is filtered and ordered here and only then cut.
+ * A tie keeps his place on the board, as it always has.
+ */
+function searchPool(ranked: RankedProspect[], q: PoolQuery): RankedProspect[] {
+  const needle = q.q.toLowerCase();
+  const wanted = q.group ? DRAFT_GROUPS[q.group] : null;
+  const found = ranked.filter((p) => {
+    if (needle && !p.name.toLowerCase().includes(needle)) return false;
+    if (wanted && !wanted.includes(p.positionName)) return false;
+    if (q.school && p.school !== q.school) return false;
+    if (q.maxAge !== null && p.age > q.maxAge) return false;
+    if (q.minPot !== null && (p.pot ?? 0) < q.minPot) return false;
+    return true;
+  });
+  const key = POOL_SORTS[q.sort];
+  const sign = q.dir === 'asc' ? 1 : -1;
+  return found.sort((a, b) => {
+    const x = key(a);
+    const y = key(b);
+    if (typeof x === 'string' || typeof y === 'string') return sign * String(x).localeCompare(String(y));
+    return sign * (x - y);
+  });
+}
+
+/** A whole number from the URL, or the fallback: the page size and place are the caller's to ask for. */
+function wholeNumber(v: unknown, fallback: number): number {
+  const n = typeof v === 'string' && v.trim() !== '' ? Math.floor(Number(v)) : NaN;
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * The draft class: a ranked board by default, and the pool behind it on request.
+ *
+ * Without parameters this is the board — the best hundred, the shortlist, and
+ * counts that describe the whole class — and it is small enough to paint at
+ * once. `?pool=1` is the class itself, a page at a time: `limit` men from
+ * `offset`, narrowed by `q` (a name), `group`, `school`, `maxAge` and `minPot`
+ * and ordered by `sort` and `dir`, with `matched` for how many the narrowing
+ * left and `total` for how many there are. The page asks for it only when its
+ * reader goes beyond the board.
+ */
 rosterOpsRoutes.get('/draft/:orgId', (req, res) => {
   if (!tableExists('players')) return res.status(400).json({ error: 'No data imported yet' });
 
   const league = draftLeague(Number(req.params.orgId));
   if (!league) return res.status(404).json({ error: 'Unknown team' });
+
+  const asPool = req.query.pool === '1';
+  const limit = Math.min(Math.max(wholeNumber(req.query.limit, 100), 0), POOL_PAGE_MAX);
+  const offset = Math.max(wholeNumber(req.query.offset, 0), 0);
 
   /*
    * Nothing is read from the players table until OOTP itself publishes the
@@ -524,158 +961,70 @@ rosterOpsRoutes.get('/draft/:orgId', (req, res) => {
    * drafts, which is most of the year, that was every visit to the page.
    */
   if (!league.poolVisible) {
-    return res.json({ ...league, total: 0, prospects: [], needs: [] });
+    return res.json(
+      asPool
+        ? { ...league, total: 0, matched: 0, offset, limit, prospects: [] }
+        : { ...league, total: 0, prospects: [], fits: [], needs: [] }
+    );
+  }
+
+  const { ranked, poolRule, excluded } = readClass(league);
+  const needs = rosterHoles(Number(req.params.orgId));
+  const thin = new Set(needs.slice(0, 3).map((h): string => h.positionName));
+  // The read is worked out for the men who are sent, not for the whole class
+  const withAdvice = (p: RankedProspect) => ({ ...p, recommendation: advise(p, thin) });
+
+  if (asPool) {
+    const query = readPoolQuery(req.query);
+    const found = searchPool(ranked, query);
+    return res.json({
+      ...league,
+      total: ranked.length,
+      matched: found.length,
+      offset,
+      limit,
+      sort: query.sort,
+      dir: query.dir,
+      prospects: found.slice(offset, offset + limit).map(withAdvice),
+    });
   }
 
   /*
-   * How this save marks the class, which is not the same in every save.
-   *
-   * A league whose amateurs are free-floating players — the ordinary case —
-   * has them flagged draft_eligible, and that is what to read. A league that
-   * runs its own high-school and college competitions does not: its amateurs
-   * are rostered players on school clubs, OOTP works eligibility out from
-   * their class when the draft comes round, and the flag stays at zero.
-   *
-   * A reader's export settled it. His pool players carried draft_eligible = 0
-   * with hsc_status 4 and his own league in draft_league_id, while the 123 the
-   * flag did pick out belonged, every one, to a second league's draft. So the
-   * flag is used where it says something and the school class where it does
-   * not — 4 is a high-school senior, 9 and 10 the college upperclassmen.
-   *
-   * The class rule reproduced his published pool exactly: 298 men in those
-   * classes, two of them with a career-ending injury, and OOTP's own screen
-   * said 296.
+   * The best at the spots the club is thinnest, read from the whole class and
+   * not from the board. The second idea on the shortlist is a fit and not the
+   * best available, so it can sit well below the hundredth man — and a board
+   * that only looked down to a hundred would have run out of catchers.
    */
-  const eligibleByFlag = (db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM players
-       WHERE draft_eligible = 1 AND retired = 0 AND hidden = 0
-         AND COALESCE(picked_in_draft, 0) != 1
-         AND COALESCE(draft_league_id, 0) IN (0, ?)`
-    )
-    .get(league.league_id) as { n: number }).n;
+  const taken = new Set(ranked.slice(0, 5).map((p) => p.player_id));
+  const fits = ranked.filter((p) => thin.has(p.positionName) && !taken.has(p.player_id)).slice(0, 3);
 
-  const classRule =
-    `COALESCE(p.draft_league_id, 0) = ? AND p.hsc_status IN (4, 9, 10)
-     AND COALESCE(p.injury_career_ending, 0) != 1`;
-  const flagRule =
-    `p.draft_eligible = 1 AND COALESCE(p.draft_league_id, 0) IN (0, ?)`;
-  const poolRule = eligibleByFlag > 0 ? flagRule : classRule;
-
-  const rows = db
-    .prepare(
-      `SELECT p.player_id, p.first_name || ' ' || p.last_name AS name, p.age, p.position, p.role,
-              p.bats, p.throws, p.college,
-              b.batting_ratings_overall_contact AS con, b.batting_ratings_overall_gap AS gap,
-              b.batting_ratings_overall_power AS pow, b.batting_ratings_overall_eye AS eye,
-              b.batting_ratings_overall_strikeouts AS avk, b.running_ratings_speed AS spd,
-              b.batting_ratings_talent_contact AS conP, b.batting_ratings_talent_gap AS gapP,
-              b.batting_ratings_talent_power AS powP, b.batting_ratings_talent_eye AS eyeP,
-              b.batting_ratings_talent_strikeouts AS avkP,
-              pi.pitching_ratings_overall_stuff AS stu, pi.pitching_ratings_overall_movement AS mov,
-              pi.pitching_ratings_overall_control AS ctl,
-              pi.pitching_ratings_talent_stuff AS stuP, pi.pitching_ratings_talent_movement AS movP,
-              pi.pitching_ratings_talent_control AS ctlP
-       FROM players p
-       LEFT JOIN players_batting b ON b.player_id = p.player_id
-       LEFT JOIN players_pitching pi ON pi.player_id = p.player_id
-       /*
-        * Still on the board, and for THIS league's draft, by whichever rule
-        * this save answers to. The eligibility flag also stays set after a man
-        * has been taken — 185 players in one save carried both it and
-        * picked_in_draft, every one stamped with this year as his draft year —
-        * so the board went on offering men who were already gone.
-        */
-       WHERE ${poolRule} AND p.retired = 0 AND p.hidden = 0
-         AND COALESCE(p.picked_in_draft, 0) != 1`
-    )
-    .all(league.league_id) as Array<Record<string, number | string | null>>;
-
-  const avg = (vals: Array<number | string | null>): number | null => {
-    const nums = vals.filter((v): v is number => typeof v === 'number' && v > 0);
-    return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
+  // What is in the pool, said before it is fetched, so the filters can say what is behind them
+  const summary = {
+    school: { HS: 0, College: 0 },
+    positions: { C: 0, IF: 0, OF: 0, P: 0 } as Record<string, number>,
   };
-  const HANDS: Record<number, string> = { 1: 'R', 2: 'L', 3: 'S' };
-  const prospects = rows
-    .map((r) => {
-      const isPitcher = r.position === 1;
-      const cur = isPitcher ? avg([r.stu, r.mov, r.ctl]) : avg([r.con, r.gap, r.pow, r.eye, r.avk]);
-      const pot = isPitcher
-        ? avg([r.stuP, r.movP, r.ctlP])
-        : avg([r.conP, r.gapP, r.powP, r.eyeP, r.avkP]);
-      return {
-        player_id: Number(r.player_id),
-        name: String(r.name),
-        age: Number(r.age ?? 0),
-        positionName: POSITION_NAMES[r.position as number] ?? '?',
-        bats: HANDS[r.bats as number] ?? '?',
-        throws: HANDS[r.throws as number] ?? '?',
-        // hsc_status is a fine-grained class code (4 = high school, 8-10 =
-        // college years) that the export ships no lookup table for. The college
-        // flag is the part that survives translation.
-        school: r.college === 1 ? 'College' : 'HS',
-        isPitcher,
-        cur,
-        pot,
-        // How much of the ceiling is still projection rather than present
-        // ability. A big gap is upside; it is also risk.
-        upside: cur !== null && pot !== null ? pot - cur : null,
-        speed: r.spd,
-      };
-    })
-    .filter((p) => p.pot !== null)
-    .sort((a, b) => (b.pot ?? 0) - (a.pot ?? 0) || (b.cur ?? 0) - (a.cur ?? 0));
-
-  const needs = rosterHoles(Number(req.params.orgId));
-  const thin = new Set(needs.slice(0, 3).map((h): string => h.positionName));
-
-  const withAdvice = prospects.map((p, i) => ({
-    ...p,
-    // Board rank within the whole class, kept through client-side sorting so a
-    // re-sorted table can still say where a player stood on ceiling
-    boardRank: i + 1,
-    recommendation: advise(p, thin),
-  }));
-
-  /*
-   * What was left out, and why.
-   *
-   * A reader reported a board with the wrong 123 men on it and had no way to
-   * tell whether the app had never seen his draft class or had seen it and
-   * ruled it out. These counts answer that from the page itself, and cost one
-   * query. They are shown only when they are not zero, so a save where none of
-   * this applies reads exactly as before.
-   */
-  const excluded = db
-    .prepare(
-      `SELECT
-         SUM(CASE WHEN COALESCE(picked_in_draft, 0) = 1 THEN 1 ELSE 0 END) AS alreadyPicked,
-         SUM(CASE WHEN COALESCE(picked_in_draft, 0) != 1
-                   AND COALESCE(draft_league_id, 0) NOT IN (0, ?) THEN 1 ELSE 0 END) AS otherDraft
-       FROM players
-       WHERE draft_eligible = 1 AND retired = 0 AND hidden = 0`
-    )
-    .get(league.league_id) as { alreadyPicked: number | null; otherDraft: number | null };
+  for (const p of ranked) {
+    summary.school[p.school === 'College' ? 'College' : 'HS'] += 1;
+    for (const [name, spots] of Object.entries(DRAFT_GROUPS)) {
+      if (spots.includes(p.positionName)) summary.positions[name] += 1;
+    }
+  }
 
   res.json({
     ...league,
-    total: prospects.length,
+    // The whole class, though `prospects` below is only its best hundred
+    total: ranked.length,
+    boardSize: BOARD_SIZE,
+    // The age the years-to-eligibility figures count to, and how many of the
+    // class are below it
+    minDraftAge: MIN_DRAFT_AGE,
+    tooYoung: ranked.filter((p) => p.yearsToEligibility > 0).length,
+    pool: summary,
     needs,
-    excluded: {
-      alreadyPicked: excluded.alreadyPicked ?? 0,
-      /*
-       * Only meaningful while the flag is what the board reads. Once it has
-       * fallen back to the school class, the men the flag picked out belong to
-       * another league's draft by definition, and saying so on this page would
-       * be reporting a fact about somebody else's club.
-       */
-      otherDraft: eligibleByFlag > 0 ? excluded.otherDraft ?? 0 : 0,
-      // Eligible, unpicked, in this draft, but carrying no scouted ceiling —
-      // there is nothing to rank him on
-      unrated: rows.length - prospects.length,
-    },
+    excluded,
     /** Which rule found this class, so the page can say when it is the class. */
-    poolRule: eligibleByFlag > 0 ? 'flag' : 'class',
-    prospects: withAdvice,
+    poolRule,
+    fits: fits.map(withAdvice),
+    prospects: ranked.slice(0, BOARD_SIZE).map(withAdvice),
   });
 });

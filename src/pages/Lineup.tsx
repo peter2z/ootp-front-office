@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiGet, getLineup, type LineupResponse } from '../api';
 import { PlayerLink, Tip } from '../playerModal';
 import { daysShort } from '../injury';
-import { findStat, plusColor as statPlusColor } from '../stats';
+import { findStat, leagueDay, plusColor as statPlusColor } from '../stats';
 import { Th } from '../Th';
+import { MethodNote } from '../MethodNote';
+import { navigate } from '../route';
 
 /** OOTP's own internal rating, which is what the ordering is actually built on. */
 const TIP_OFF_VALUE =
@@ -23,12 +25,207 @@ const plusColor = (value: number | null): string | undefined => {
   return def ? statPlusColor(def, value) : undefined;
 };
 
+/**
+ * How each style of card is ordered. It is also the line shown while the note
+ * about the card is folded, so the gist is there without opening anything.
+ */
+const ORDERING: Record<'saber' | 'trad', string> = {
+  saber: 'Ordering per The Book (Tango et al.): your three best hitters bat 1, 2, and 4 — not 3-4-5.',
+  trad: 'Classic ordering: speed leads off, bat control 2nd, best hitter 3rd, power cleanup.',
+};
+
 interface NextGame {
+  /** The game itself, which is what the link to its plan needs. Absent in an export made before it was sent. */
+  game_id?: number;
   date: string;
   isHome: boolean;
   opponent: string;
   ourStarter: { player_id: number; name: string; throws: string } | null;
   theirStarter: { player_id: number; name: string; throws: string } | null;
+}
+
+/**
+ * The way from the banner to the plan for the game it is about: the Schedule,
+ * opened on that game with its plan up. Nothing for an export made before the
+ * next game carried its id, since there is no game to name.
+ */
+export function GamePlanLink({ game }: { game: number | undefined }) {
+  if (game === undefined) return null;
+  return (
+    <button
+      type="button"
+      className="link-button"
+      title="Open the game plan for this game"
+      onClick={() => navigate('schedule', { game })}
+    >
+      Game plan
+    </button>
+  );
+}
+
+/**
+ * Puts text on the clipboard, and says whether it got there.
+ *
+ * The clipboard API where the page may use it: a secure context, in a window
+ * the browser counts as in use. Where that is missing or refuses (an address
+ * that is neither https nor localhost, as on a copy of the app served over a
+ * network, or a window that has lost focus) the older way still works from
+ * inside a click: put the text in a textarea, select it, and ask the browser to
+ * copy the selection. False only when both have failed, so the button can say
+ * so instead of looking as if it had worked.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Refused. The textarea has no permission to be refused, so it gets its turn
+  }
+  return copyViaTextarea(text);
+}
+
+function copyViaTextarea(text: string): boolean {
+  if (typeof document === 'undefined' || !document.body) return false;
+  const kept = document.activeElement as { focus?: () => void } | null;
+  const box = document.createElement('textarea');
+  box.value = text;
+  // Read-only so a phone does not raise its keyboard. Out of sight but in the
+  // page, because a selection needs something that has been drawn
+  box.setAttribute('readonly', '');
+  box.style.position = 'fixed';
+  box.style.top = '0';
+  box.style.left = '-9999px';
+  box.style.opacity = '0';
+  document.body.appendChild(box);
+  let copied = false;
+  try {
+    box.focus();
+    box.select();
+    // iOS ignores select() on a textarea and wants the range said outright
+    box.setSelectionRange(0, text.length);
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  } finally {
+    document.body.removeChild(box);
+    // Back to the button that was pressed, so the keyboard is where it was
+    kept?.focus?.();
+  }
+  return copied;
+}
+
+/**
+ * A button that copies a card as plain text, and says so for a moment.
+ *
+ * The cards on the lineup and pitching pages were a screenful of table that
+ * could not leave the app: pasting one into a message, a note or a forum meant
+ * retyping it. The text is built when the button is pressed, from whatever the
+ * page is showing then, so what is copied is what was on the screen.
+ *
+ * "Copied" fades out by itself, and a failure stays up longer, since that one
+ * is news. The note sits in a status region that is always on the page, so a
+ * screen reader is told when it fills.
+ */
+export function CopyButton({ label, text, className }: {
+  label: string;
+  text: () => string;
+  className?: string;
+}) {
+  const [note, setNote] = useState<'copied' | 'failed' | null>(null);
+  const [fading, setFading] = useState(false);
+  const timers = useRef<number[]>([]);
+  const clear = () => {
+    timers.current.forEach((t) => window.clearTimeout(t));
+    timers.current = [];
+  };
+  // Leaving the page with the note still up must not leave a timer behind
+  useEffect(() => clear, []);
+
+  const press = async () => {
+    const ok = await copyText(text());
+    clear();
+    setNote(ok ? 'copied' : 'failed');
+    setFading(false);
+    timers.current = [
+      window.setTimeout(() => setFading(true), ok ? 1200 : 3000),
+      window.setTimeout(() => setNote(null), ok ? 1800 : 3600),
+    ];
+  };
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <button type="button" className={className} onClick={() => void press()}>
+        {label}
+      </button>
+      {/* Drawn in at once and faded out over the last half-second, which is
+          the only time the transition is switched on */}
+      <span
+        role="status"
+        className={note === 'failed' ? 'warn' : 'ok'}
+        style={{
+          opacity: note !== null && !fading ? 1 : 0,
+          transition: fading ? 'opacity 0.6s ease' : 'none',
+        }}
+      >
+        {note === 'copied' ? 'Copied' : note === 'failed' ? 'Could not copy' : ''}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The card as plain text, for pasting into a message, a note or a forum.
+ *
+ * One line to a man, with the position he plays and the side he bats from,
+ * which is what a lineup card says. The header carries what the card was built
+ * for, because pasted away from the page nothing else will: the hand it is
+ * against, how it was ordered, and tonight's game when there is one. Written
+ * from what the page was handed rather than read back off the screen.
+ */
+export function lineupCard(
+  data: LineupResponse,
+  extras: { next?: NextGame | null; sort?: 'talent' | 'production' } = {}
+): string {
+  const built = [
+    data.style === 'trad' ? 'Traditional' : 'Sabermetric',
+    extras.sort === 'production' ? 'by production' : extras.sort === 'talent' ? 'by talent' : null,
+    data.usesDH === undefined ? null : data.usesDH ? 'with DH' : 'no DH',
+  ].filter((part): part is string => part !== null);
+  const lines = [`Lineup vs ${data.vs === 'l' ? 'LHP' : 'RHP'} (${built.join(', ')})`];
+
+  const game = extras.next;
+  if (game) {
+    const who = [
+      game.theirStarter && `their probable: ${game.theirStarter.name} (${game.theirStarter.throws}HP)`,
+      game.ourStarter && `ours: ${game.ourStarter.name}`,
+    ].filter(Boolean);
+    lines.push(
+      `Tonight, ${game.date}: ${game.isHome ? 'vs' : '@'} ${game.opponent}` +
+        (who.length > 0 ? ` (${who.join('; ')})` : '')
+    );
+  }
+
+  lines.push('');
+  for (const l of data.lineup) {
+    lines.push(`${l.slot}. ${l.name}, ${l.positionName} (bats ${l.bats})${l.dayToDay ? ' - day-to-day' : ''}`);
+  }
+
+  const aside: string[] = [];
+  if (data.bench.length > 0) {
+    aside.push(`Bench: ${data.bench.map((b) => `${b.name} (${b.positionName})`).join(', ')}`);
+  }
+  if (data.unavailable.length > 0) {
+    aside.push(
+      `Unavailable: ${data.unavailable
+        .map((u) => `${u.name} (${u.positionName}, ${u.status}${daysShort(u) ? `, ${daysShort(u)}` : ''})`)
+        .join(', ')}`
+    );
+  }
+  if (aside.length > 0) lines.push('', ...aside);
+
+  return lines.join('\n');
 }
 
 export function Lineup({ teamId }: { teamId: number }) {
@@ -66,7 +263,7 @@ export function Lineup({ teamId }: { teamId: number }) {
     <div>
       {next && (
         <div className="next-game-banner">
-          <span className="story-category">Tonight · {next.date}</span>
+          <span className="story-category">Tonight · {leagueDay(next.date)}</span>
           <span>
             {next.isHome ? 'vs' : '@'} <strong>{next.opponent}</strong>
             {next.theirStarter && (
@@ -100,6 +297,12 @@ export function Lineup({ teamId }: { teamId: number }) {
                 Build vs {next.theirStarter.name}
               </button>
             ))}
+          {/*
+            The plan for this game (their starter, how our hitters have done
+            against him, who to be careful with) was reachable only by finding
+            the game in the schedule. It is one click from the game it is for.
+          */}
+          <GamePlanLink game={next.game_id} />
         </div>
       )}
       <div className="toolbar">
@@ -149,53 +352,62 @@ export function Lineup({ teamId }: { teamId: number }) {
             </button>
           </div>
         )}
+        {/* The card as it is on screen, as plain text for a message or a note */}
+        {data && <CopyButton label="Copy lineup" text={() => lineupCard(data, { next, sort })} />}
       </div>
       {error && <div className="banner error">{error}</div>}
       {!data && !error && <p className="muted">Building lineup…</p>}
       {data && (
         <>
-          <p className="muted hint-line">
-            {style === 'saber'
-              ? 'Ordering per The Book (Tango et al.): your three best hitters bat 1, 2, and 4 — not 3-4-5.'
-              : 'Classic ordering: speed leads off, bat control 2nd, best hitter 3rd, power cleanup.'}{' '}
-            {sort === 'talent' ? (
-              <>
-                Ranked on OOTP's offensive value {vs === 'r' ? 'vs right-handed' : 'vs left-handed'} pitching —
-                a projection from current ratings, not this season's results.{' '}
-              </>
-            ) : (
-              <>
-                Ranked on this season's wRC+, regressed toward league average on plate appearances so a
-                hot twenty at-bats does not lead off. Not platoon-split: the production sort reads the
-                whole season, so the vs-LHP/RHP choice only moves the defensive assignment.{' '}
-              </>
-            )}
-            {/* Said out loud because it is a claim the reader can check, and
-                because a card that quietly rearranges itself is unnerving */}
-            {data.runSearch?.moved && data.runSearch.gain >= 1 && (
-              <>
-                Then searched: swapping pairs against an expected-runs model moved this card from{' '}
-                {data.runSearch.seededRuns.toFixed(1)} to {data.runSearch.optimisedRuns.toFixed(1)} runs
-                a season,{' '}
-                <strong>+{data.runSearch.gain.toFixed(1)}</strong> in {data.runSearch.evaluations} tries. The model
-                leaves out double plays and steals, so read that as an estimate.{' '}
-              </>
-            )}
-            {data.dhOverridden ? (
+          <MethodNote pageKey="lineup" summary={ORDERING[style]}>
+            <p className="muted hint-line">
+              {ORDERING[style]}{' '}
+              {sort === 'talent' ? (
+                <>
+                  Ranked on OOTP's offensive value {vs === 'r' ? 'vs right-handed' : 'vs left-handed'} pitching —
+                  a projection from current ratings, not this season's results.
+                </>
+              ) : (
+                <>
+                  Ranked on this season's wRC+, regressed toward league average on plate appearances so a
+                  hot twenty at-bats does not lead off. Not platoon-split: the production sort reads the
+                  whole season, so the vs-LHP/RHP choice only moves the defensive assignment.
+                </>
+              )}
+            </p>
+          </MethodNote>
+          {/*
+            What follows says something about the card in front of you rather
+            than about the method, so it is not in the note: one nobody opens
+            would hide it for good. The search is said out loud because it is a
+            claim the reader can check, and because a card that quietly
+            rearranges itself is unnerving.
+          */}
+          {data.runSearch?.moved && data.runSearch.gain >= 1 && (
+            <p className="muted hint-line">
+              Then searched: swapping pairs against an expected-runs model moved this card from{' '}
+              {data.runSearch.seededRuns.toFixed(1)} to {data.runSearch.optimisedRuns.toFixed(1)} runs
+              a season,{' '}
+              <strong>+{data.runSearch.gain.toFixed(1)}</strong> in {data.runSearch.evaluations} tries. The model
+              leaves out double plays and steals, so read that as an estimate.
+            </p>
+          )}
+          {data.dhOverridden ? (
+            <p className="muted hint-line">
               <strong>
                 {data.usesDH
                   ? 'Showing a DH card, which this league does not use.'
                   : 'Showing a no-DH card, which this league does not use.'}
               </strong>
-            ) : (
-              data.usesDH === false && (
-                <>
-                  This league bats no designated hitter, so the order is eight position players with
-                  tonight&rsquo;s starting pitcher batting ninth.
-                </>
-              )
-            )}
-          </p>
+            </p>
+          ) : (
+            data.usesDH === false && (
+              <p className="muted hint-line">
+                This league bats no designated hitter, so the order is eight position players with
+                tonight&rsquo;s starting pitcher batting ninth.
+              </p>
+            )
+          )}
           <table>
             <thead>
               <tr>

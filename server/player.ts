@@ -7,6 +7,8 @@ import { controlAfterThisSeason, serviceRemainingThisSeason } from './contracts.
 import { playerTransactions, scoutingReport } from './playerfile.js';
 import { DATE_KEY } from './dashboard.js';
 import { NO_TIMETABLE } from './health.js';
+import { rosterCrunch } from './rosterops.js';
+import { FORTY_MAN_LIMIT, OPTIONS_ALLOWED, outOfOptions, serviceYearsOf } from './org.js';
 
 export const playerRoutes = Router();
 
@@ -111,7 +113,7 @@ playerRoutes.get('/player/:id', (req, res) => {
       // between seasons in any save that runs a few
       `SELECT p.*, t.name AS team_name, t.nickname AS team_nickname, t.level AS team_level,
               t.league_id AS team_league,
-              o.name AS org_name, o.nickname AS org_nickname
+              o.name AS org_name, o.nickname AS org_nickname, o.level AS org_level
        FROM players p LEFT JOIN teams t ON t.team_id = p.team_id
        LEFT JOIN teams o ON o.team_id = p.organization_id
        WHERE p.player_id = ?`
@@ -391,6 +393,40 @@ playerRoutes.get('/player/:id', (req, res) => {
         .get(id) as { total: number | null; first: number | null; last: number | null })
     : null;
 
+  /*
+   * Where he stands on the 40-man, which is the first thing a call-up turns on.
+   *
+   * A reader who followed a prospect from the farm page to this card found his
+   * ratings, his history and "0 yrs MLB service", and nothing about whether he
+   * was on the 40-man, how many options he had, or how full the roster was —
+   * so he opened the 40-Man page separately to find out. Who is on the 40-man
+   * and how many it holds are that page's own reading (rosterCrunch), so the
+   * card and the page cannot disagree; the options rule is the one it applies.
+   */
+  const orgId = Number(p.organization_id ?? 0);
+  const crunch = orgId > 0 && rosterStatus ? rosterCrunch(orgId) : null;
+  const listed = crunch?.fortyMan.find((m) => m.player_id === id) ?? null;
+  // Null where the export does not carry the column, rather than a confident zero
+  const optionsUsed = typeof rosterStatus?.options_used === 'number' ? rosterStatus.options_used : null;
+  // Below his organisation's top club, which on an unaffiliated save need not be level 1
+  const inTheMinors =
+    typeof p.team_level === 'number' && typeof p.org_level === 'number' && p.team_level > p.org_level;
+  const standing = crunch
+    ? {
+        on40: listed !== null,
+        on26: listed?.on26 ?? false,
+        /** On the 60-day list: still listed with the 40-man, but not counted on it. */
+        il60: listed?.il60 ?? false,
+        optionsUsed,
+        optionsLeft: optionsUsed === null ? null : Math.max(OPTIONS_ALLOWED - optionsUsed, 0),
+        outOfOptions: outOfOptions(
+          optionsUsed, serviceYearsOf(rosterStatus?.mlb_service_days, rosterStatus?.mlb_service_years)
+        ),
+        /** How full his organisation's 40-man is, for a man who would need a place on it. */
+        fortyMan: inTheMinors ? { count: crunch.counts.fortyMan, limit: FORTY_MAN_LIMIT } : null,
+      }
+    : null;
+
   res.json({
     player_id: id,
     contact,
@@ -420,6 +456,10 @@ playerRoutes.get('/player/:id', (req, res) => {
     /** Whose player he is — the parent club, named rather than inferred. */
     organization: p.org_name ? `${p.org_name} ${p.org_nickname}` : (p.free_agent === 1 ? 'Free Agent' : null),
     serviceYears: rosterStatus?.mlb_service_years ?? null,
+    // Exact days too, so the card can write service as years.days rather than a rounded decimal
+    serviceDays: rosterStatus?.mlb_service_days ?? null,
+    /** The 40-man, his options, and for a minor leaguer how much room there is. Null without roster data. */
+    rosterStatus: standing,
     overallPct: overallPct(id),
     talentPct: talentPct(id),
     oaRating: values.get(id)?.oaRating ?? null,

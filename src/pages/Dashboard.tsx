@@ -7,6 +7,7 @@ import { TeamLogo } from '../TeamLogo';
 import { daysShort } from '../injury';
 import { Th } from '../Th';
 import { PlayerNames } from '../PlayerNames';
+import type { Page, ParamsIn } from '../route';
 
 /** Where the club stands for a place, which the division table does not say. */
 interface Playoffs {
@@ -84,6 +85,8 @@ interface DashboardData {
   deadline?: DeadlineRead | null;
   recent: Array<{ date: string; opponent: string; isHome: boolean; score: string; won: boolean; innings: number }>;
   upcoming: Array<{
+    /** The game itself, for the link to its plan. Absent in an export made before it was sent. */
+    game_id?: number;
     date: string; isHome: boolean; opponent: string;
     ourStarter: { player_id: number; name: string; throws: string } | null;
     theirStarter: { player_id: number; name: string; throws: string } | null;
@@ -96,8 +99,16 @@ interface DashboardData {
   cold: FormRow[];
   injuries: Array<{ player_id: number; name: string; positionName: string; levelName: string; status: string; daysLeft: number | null; durationUnknown: boolean }>;
   pending: {
-    expiring: number; extensionCandidates: number; promoteSignals: number;
-    injuredCount: number; crunchIssues: number;
+    expiring: number; extensionCandidates: number;
+    /**
+     * Farm men the page asks you to decide about: promote, blocked or demote.
+     * "Watch" is not counted, which is most of what the farm page flags.
+     */
+    farmSignals: number;
+    farmBreakdown?: { promote: number; blocked: number; demote: number };
+    injuredCount: number;
+    /** The length of the Needs attention list on the Roster Crunch page. */
+    crunchIssues: number;
     /** Optional: a save imported before this existed has no count to show. */
     tradeTalk?: number;
   };
@@ -112,7 +123,14 @@ interface Briefing {
   job?: JobStatus;
 }
 
-export function Dashboard({ orgId, onNavigate }: { orgId: number; onNavigate: (page: string) => void }) {
+/**
+ * `onNavigate` opens a page, and may say what to open it on: the chips pass the
+ * filter that makes the page show what the count counted.
+ */
+export function Dashboard({ orgId, onNavigate }: {
+  orgId: number;
+  onNavigate: (page: Page, params?: ParamsIn) => void;
+}) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The briefing runs on the server, so this watches it rather than waits for
@@ -186,10 +204,28 @@ export function Dashboard({ orgId, onNavigate }: { orgId: number; onNavigate: (p
         </section>
       )}
 
+      {/* A chip opens its page already filtered to what it counted, so the number
+          here and the rows there can be checked against each other. The farm
+          one is the three signals that ask for a call; the contract ones are
+          the same two tests the server counts them with. The other three open
+          pages that lead with the very list they count, so they carry nothing. */}
       <div className="dash-decisions">
-        <DecisionChip label="Expiring contracts" count={data.pending.expiring} onClick={() => onNavigate('contracts')} />
-        <DecisionChip label="Extension candidates" count={data.pending.extensionCandidates} onClick={() => onNavigate('contracts')} />
-        <DecisionChip label="Promotion signals" count={data.pending.promoteSignals} onClick={() => onNavigate('prospects')} />
+        <DecisionChip
+          label="Expiring contracts"
+          count={data.pending.expiring}
+          onClick={() => onNavigate('contracts', { flag: 'expiring' })}
+        />
+        <DecisionChip
+          label="Extension candidates"
+          count={data.pending.extensionCandidates}
+          onClick={() => onNavigate('contracts', { action: 'extension' })}
+        />
+        <DecisionChip
+          label="Farm signals"
+          count={data.pending.farmSignals}
+          title={farmBreakdownTitle(data.pending.farmBreakdown)}
+          onClick={() => onNavigate('prospects', { signal: 'decision' })}
+        />
         <DecisionChip label="Trade talk" count={data.pending.tradeTalk ?? 0} onClick={() => onNavigate('trades')} />
         <DecisionChip label="Roster issues" count={data.pending.crunchIssues} onClick={() => onNavigate('crunch')} />
         <DecisionChip label="Injured org-wide" count={data.pending.injuredCount} onClick={() => onNavigate('injuries')} />
@@ -247,26 +283,7 @@ export function Dashboard({ orgId, onNavigate }: { orgId: number; onNavigate: (p
 
         <section className="dash-panel">
           <h3>Up Next</h3>
-          <table className="mini">
-            <tbody>
-              {data.upcoming.map((g, i) => (
-                <tr key={i}>
-                  <td>{g.date.slice(5)}</td>
-                  <td>{g.isHome ? 'vs' : '@'} {g.opponent}</td>
-                  {/* Two full names and a hand fit no fixed width, and the
-                      cell was running out past the edge of the panel */}
-                  <td className="muted wrap-cell">
-                    {g.ourStarter && <PlayerLink id={g.ourStarter.player_id}>{g.ourStarter.name}</PlayerLink>}
-                    {g.theirStarter && (
-                      <>
-                        {' '}v <PlayerLink id={g.theirStarter.player_id}>{g.theirStarter.name}</PlayerLink> ({g.theirStarter.throws}HP)
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <UpNext games={data.upcoming} onNavigate={onNavigate} />
         </section>
 
         <section className="dash-panel">
@@ -372,9 +389,77 @@ export function Dashboard({ orgId, onNavigate }: { orgId: number; onNavigate: (p
   );
 }
 
-function DecisionChip({ label, count, onClick }: { label: string; count: number; onClick: () => void }) {
+/**
+ * The next few games, each with a way into the plan for it.
+ *
+ * The plan (their starter, how our hitters have done against him, who to be
+ * careful with) was reachable only from the Schedule, by finding the game in a
+ * list of a hundred and sixty. These five rows are the games a manager opens it
+ * for, so each says "Plan" and opens the Schedule on that game with the plan
+ * already up.
+ */
+export function UpNext({ games, onNavigate }: {
+  games: DashboardData['upcoming'];
+  onNavigate: (page: Page, params?: ParamsIn) => void;
+}) {
+  // An export made before the games carried their id has nothing to open, and
+  // an empty column of links would only take room from the starters
+  const linked = games.some((g) => g.game_id !== undefined);
   return (
-    <button className={`decision-chip ${count > 0 ? 'has-items' : ''}`} onClick={onClick}>
+    <table className="mini">
+      <tbody>
+        {games.map((g, i) => (
+          <tr key={i}>
+            <td>{g.date.slice(5)}</td>
+            <td>{g.isHome ? 'vs' : '@'} {g.opponent}</td>
+            {/* Two full names and a hand fit no fixed width, and the
+                cell was running out past the edge of the panel */}
+            <td className="muted wrap-cell">
+              {g.ourStarter && <PlayerLink id={g.ourStarter.player_id}>{g.ourStarter.name}</PlayerLink>}
+              {g.theirStarter && (
+                <>
+                  {' '}v <PlayerLink id={g.theirStarter.player_id}>{g.theirStarter.name}</PlayerLink> ({g.theirStarter.throws}HP)
+                </>
+              )}
+            </td>
+            {linked && (
+              <td className="series-plan">
+                {g.game_id !== undefined && (
+                  <button
+                    type="button"
+                    className="link-button"
+                    title="Open the game plan for this game"
+                    aria-label={`Plan for ${g.date.slice(5)} ${g.isHome ? 'vs' : '@'} ${g.opponent}`}
+                    onClick={() => onNavigate('schedule', { game: g.game_id })}
+                  >
+                    Plan
+                  </button>
+                )}
+              </td>
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * What the farm count is made of, for the chip's hover text: "0 promote · 17
+ * blocked · 2 demote". The page it opens lists the men marked watch as well, so
+ * without this the two numbers read as a disagreement.
+ */
+export function farmBreakdownTitle(
+  b: { promote: number; blocked: number; demote: number } | undefined
+): string | undefined {
+  return b ? `${b.promote} promote · ${b.blocked} blocked · ${b.demote} demote` : undefined;
+}
+
+function DecisionChip({
+  label, count, onClick, title,
+}: { label: string; count: number; onClick: () => void; title?: string }) {
+  return (
+    <button className={`decision-chip ${count > 0 ? 'has-items' : ''}`} onClick={onClick} title={title}>
       <span className="decision-count">{count}</span>
       <span>{label}</span>
     </button>

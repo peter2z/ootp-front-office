@@ -1,0 +1,11 @@
+newest source file before copy: 10/2/2026 8:44:53 AM \import_export\csv\team_history_financials.csv
+newest source file after copy:  10/2/2026 8:44:53 AM \import_export\csv\team_history_financials.csv
+Error formatting a string: Index (zero based) must be greater than or equal to zero and less than the size of the 
+argument list..
+At line:14 char:1
++ Write-Output ("copied in {0:n0}s: {1} files / {2:n0} MB  ->  {3} file ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (copied in {0:n0...les / {4:n0} MB:String) [], RuntimeException
+    + FullyQualifiedErrorId : FormatError
+ 
+source unchanged during copy: OK

@@ -2,16 +2,20 @@ import { Router } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, tableExists } from './db.js';
+import { db, tableColumns, tableExists } from './db.js';
 import { DATA_DIR } from './config.js';
 import { activeProvider, aiModel, getApiKey } from './settings.js';
-import { describeError, stripProviderExtras, toolLoopFor, type ProviderId } from './providers.js';
+import {
+  describeError, finishLoop, stripProviderExtras, throwIfStopped, toolLoopFor, type ProviderId,
+} from './providers.js';
 import { supportsAdaptiveThinking } from './models.js';
 import {
-  VALUE_PERCENTILE_NOTE, calendarBriefing, currentGameDate, orgBriefing, seasonYear,
+  VALUE_PERCENTILE_NOTE, calendarBriefing, currentGameDate, leagueRules, orgBriefing,
+  ratingScaleMax, seasonYear, usesDH,
 } from './valuation.js';
 import { tradingBlock } from './tradingblock.js';
 import { personaBrief, personaById, personasFor, type Persona } from './staff.js';
+import { addPlayerNote, findPlayerNote, isWatched, unwatchPlayer, watchPlayer } from './history.js';
 
 export const chatRoutes = Router();
 
@@ -118,6 +122,10 @@ function cap(value: unknown, maxChars = 60_000): string {
  * shortstop from the farm, it answered that it had nothing in front of it
  * beyond the players already in the deal — which was true, and useless. It
  * should be able to go and look, exactly as the staff chat does.
+ *
+ * They only read, and that is a rule rather than a habit: the trade desk is
+ * handed this list as it stands. What the staff chat can do beyond looking is
+ * in ACTING_TOOLS below, which the desk never sees.
  */
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -366,6 +374,83 @@ export const TOOLS: Anthropic.Tool[] = [
   },
 ];
 
+/** The part of every acting tool's description that matters most to the model. */
+const APP_ONLY =
+  'This changes the user\u2019s own data in this app and nothing in OOTP: no roster, contract or ' +
+  'lineup moves, and the save is not written to.';
+/** And the part that keeps it from acting unasked, and from acting silently. */
+const SAY_SO =
+  'Do it only when the user asks, or says yes to your offer. Afterwards say in your reply, in ' +
+  'one line, exactly what you did; if the tool reports an error, say that instead.';
+
+/**
+ * The tools only the staff chat has, because they change something.
+ *
+ * Everything above reads. The assistant could look at the whole league and do
+ * nothing about what it saw: it could not put a man it had just recommended on
+ * the watchlist, or keep the plan it had just given, so the GM copied both
+ * across by hand — the slowest part of a morning check-in, and the part most
+ * likely to be skipped. These three close that gap and no further.
+ *
+ * What they touch is this app's own notebook, the watchlist and the notes on a
+ * player's card, kept in history.db with the rest of what the app remembers.
+ * None of it reaches OOTP: no roster, contract or lineup moves, and the save is
+ * never written to. Each description says so in the model's hearing, since a
+ * model that takes "watch" to mean doing something in the game will promise
+ * things nobody can deliver.
+ *
+ * Kept out of TOOLS on purpose, and run by runChatTool rather than runTool. The
+ * trade desk is handed TOOLS, and a voice that was only asked to weigh a deal
+ * should not be able to change anything while it does.
+ */
+export const ACTING_TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'watch_player',
+    description:
+      'Adds a player to the user\u2019s watchlist, the list of men they are keeping an eye on. ' +
+      `${APP_ONLY} Call search_players first to get the player_id. ${SAY_SO} ` +
+      'For example: "Added Gerrit Cole to the watchlist."',
+    input_schema: {
+      type: 'object',
+      properties: { player_id: { type: 'number' } },
+      required: ['player_id'],
+    },
+  },
+  {
+    name: 'unwatch_player',
+    description:
+      'Takes a player off the user\u2019s watchlist. ' +
+      `${APP_ONLY} ${SAY_SO} For example: "Took Gerrit Cole off the watchlist."`,
+    input_schema: {
+      type: 'object',
+      properties: { player_id: { type: 'number' } },
+      required: ['player_id'],
+    },
+  },
+  {
+    name: 'add_note',
+    description:
+      'Files a note on a player\u2019s card, where the user will find it later, with your name and ' +
+      'the game date on it. Use it for something worth keeping: a plan, a reason, a thing to ' +
+      `check when he is back. ${APP_ONLY} ${SAY_SO} ` +
+      'For example: "Filed a note on Gerrit Cole\u2019s card."',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_id: { type: 'number' },
+        note: {
+          type: 'string',
+          description: 'The note, in plain text: a sentence or three, under 2,000 characters.',
+        },
+      },
+      required: ['player_id', 'note'],
+    },
+  },
+];
+
+/** What the staff chat is offered: everything that reads, and the three that write. */
+export const CHAT_TOOLS: Anthropic.Tool[] = [...TOOLS, ...ACTING_TOOLS];
+
 export async function runTool(name: string, input: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'search_players': {
@@ -474,6 +559,81 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
   }
 }
 
+/** The longest note the chat may file: a sentence or three, not an answer pasted whole. */
+const NOTE_LIMIT = 2000;
+
+/**
+ * The man a write is about, from the save.
+ *
+ * Looked up rather than trusted. The model is handed an id by search_players
+ * and is as capable of misquoting it as of getting it right, and a watchlist
+ * row for a man who is not in the save is one the page cannot draw. Also where
+ * the name comes from, so what is stored is how the game spells it and not how
+ * the model happened to.
+ */
+function knownPlayer(input: Record<string, unknown>): { id: number; name: string } {
+  const id = Number(input.player_id);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error('player_id is required. Call search_players first to get it.');
+  }
+  const row = tableExists('players')
+    ? (db.prepare(`SELECT first_name, last_name FROM players WHERE player_id = ?`).get(id) as
+        | { first_name: string | null; last_name: string | null }
+        | undefined)
+    : undefined;
+  if (!row) throw new Error(`There is no player with player_id ${id}. Call search_players to find him.`);
+  return { id, name: `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || `player ${id}` };
+}
+
+/**
+ * The staff chat's dispatcher: its own three, then everything every voice has.
+ *
+ * Each answer is a sentence the model can say back, because the reply has to
+ * confirm what was done and the surest way to get a true confirmation is to
+ * hand over the true one. Where nothing changed it says that too: "already on
+ * the list" is not "added", and a model told only "ok" will claim the second.
+ *
+ * `source` is who is speaking. A note carries the name of whoever wrote it, as
+ * the ones saved from the chat window already do.
+ */
+export async function runChatTool(
+  name: string,
+  input: Record<string, unknown>,
+  source?: string
+): Promise<string> {
+  switch (name) {
+    case 'watch_player': {
+      const who = knownPlayer(input);
+      // Left alone when he is already there, which keeps his note and his place in the list
+      if (isWatched(who.id)) return `${who.name} is already on the watchlist. Nothing changed.`;
+      watchPlayer(who.id, who.name);
+      return `Added ${who.name} to the watchlist.`;
+    }
+    case 'unwatch_player': {
+      const who = knownPlayer(input);
+      return unwatchPlayer(who.id)
+        ? `Took ${who.name} off the watchlist.`
+        : `${who.name} was not on the watchlist. Nothing changed.`;
+    }
+    case 'add_note': {
+      const who = knownPlayer(input);
+      const note = String(input.note ?? '').trim();
+      if (!note) throw new Error('The note is empty. Say what is worth keeping.');
+      if (note.length > NOTE_LIMIT) {
+        throw new Error(`The note is ${note.length} characters. Keep it under ${NOTE_LIMIT}.`);
+      }
+      // A room can send several voices at one request, and a model told to retry will
+      if (findPlayerNote(who.id, note) !== null) {
+        return `That note is already on ${who.name}\u2019s card. Nothing added.`;
+      }
+      addPlayerNote({ playerId: who.id, playerName: who.name, source: source ?? 'Assistant', body: note });
+      return `Filed a note on ${who.name}\u2019s card.`;
+    }
+    default:
+      return runTool(name, input);
+  }
+}
+
 function defaultOrgId(): number {
   const row = db.prepare(`SELECT team_id FROM teams WHERE human_team = 1 LIMIT 1`).get() as
     | { team_id: number }
@@ -483,6 +643,81 @@ function defaultOrgId(): number {
     | { team_id: number }
     | undefined;
   return any?.team_id ?? 1;
+}
+
+/** How OOTP's rating scales are written, keyed by the top of each. */
+const SCALE_NAMES: Record<number, string> = { 80: '20-80', 20: '1-20', 10: '1-10', 8: '2-8', 5: '1-5' };
+
+/**
+ * The rules the save is played under, a line each, for every voice.
+ *
+ * The chat was handed the date and the organisation and left to assume the
+ * rest from the modern game: a DH everywhere, free agency at six years, option
+ * rules, twenty-six men, ratings out of eighty. A save can differ on every one
+ * of those — a pre-1973 replay has no DH, a reserve-clause league no free
+ * agency, and the rating scale is the user's own setting — and an answer that
+ * assumes the modern game is wrong in a way the reader cannot see. Read from
+ * the imported league settings; a rule the export does not carry is left
+ * unsaid rather than guessed at. Kept short because every message pays for it.
+ */
+export function leagueRulesBriefing(orgId: number): string {
+  if (!tableExists('teams') || !tableExists('leagues')) return '';
+  const team = db.prepare(`SELECT league_id FROM teams WHERE team_id = ?`).get(orgId) as
+    | { league_id: number }
+    | undefined;
+  if (!team) return '';
+  const rules = leagueRules(team.league_id);
+  const have = new Set(tableColumns('leagues'));
+  const columns = [
+    'rules_active_roster_limit', 'rules_secondary_roster_limit', 'rules_expanded_roster_limit',
+    'rules_minor_league_options', 'rules_min_service_days',
+  ].filter((c) => have.has(c));
+  const row = (columns.length > 0
+    ? db.prepare(`SELECT ${columns.join(', ')} FROM leagues WHERE league_id = ?`).get(team.league_id)
+    : undefined) as Record<string, number | null> | undefined;
+  /** A setting the save actually carries; zero is how an unset limit is written. */
+  const set = (column: string): number | null => {
+    const v = row?.[column];
+    return typeof v === 'number' && v > 0 ? v : null;
+  };
+
+  const said: string[] = [
+    usesDH(orgId)
+      ? 'This club\'s league uses the designated hitter.'
+      : 'This club\'s league has no designated hitter: the pitcher bats.',
+  ];
+  const serviceYear = set('rules_min_service_days');
+  const arbitration = rules.hasArbitration
+    ? `salary arbitration from ${rules.arbMinYears}`
+    : 'no salary arbitration';
+  said.push(
+    rules.hasFreeAgency
+      ? `Free agency after ${rules.faMinYears} years of major-league service, ${arbitration}` +
+          (serviceYear ? ` (a service year is ${serviceYear} days).` : '.')
+      : `No free agency: the reserve clause binds every player to his club, and ${arbitration}.`
+  );
+  const options = row?.rules_minor_league_options;
+  if (options === 1) {
+    said.push('Option rules apply: a player out of options must clear waivers to be sent down.');
+  } else if (options === 0) {
+    said.push('There are no option rules: players move between levels freely.');
+  }
+  const active = set('rules_active_roster_limit');
+  const expanded = set('rules_expanded_roster_limit');
+  const reserve = set('rules_secondary_roster_limit');
+  if (active) {
+    said.push(
+      `Roster limits: ${active} active` +
+        (expanded && expanded > active ? ` (${expanded} once rosters expand)` : '') +
+        (reserve ? ` and a ${reserve}-man roster.` : '.')
+    );
+  }
+  const top = ratingScaleMax();
+  said.push(
+    `Ratings are on the ${SCALE_NAMES[top] ?? `1-${top}`} scale` +
+      (top === 80 ? ', where 50 is major-league average.' : '.')
+  );
+  return `LEAGUE RULES, from the save: ${said.join(' ')} Go by these, not the real-world rules.`;
 }
 
 /**
@@ -546,6 +781,8 @@ function systemPrompt(orgId: number, persona: Persona): string {
      */
     orgBriefing(orgId),
     '',
+    leagueRulesBriefing(orgId),
+    '',
     'Everything you say about this league must come from the tools. They read the actual save, so',
     'they are the only source of truth here — this is a simulated league, and your training data',
     'contains nothing about it. Never answer a factual question about a player, team, or record',
@@ -577,8 +814,16 @@ function systemPrompt(orgId: number, persona: Persona): string {
     'from years-remaining alone — a player with arbitration left is under control for years yet,',
     'and pricing him as a rental is badly wrong in both directions.',
     '',
-    'Useful context on the numbers: OPS+, wRC+, and ERA+ are scaled so 100 is league average and',
-    'are park- and league-adjusted, so they compare players across teams and levels fairly.',
+    /*
+     * Said only as far as it is true. The trade desk used to add a man's
+     * levels together and leave the park out while this told the model every
+     * figure was park- and league-adjusted; its lines are now read per level
+     * in the park he played in, and the trading block's lines are read the
+     * same way, so the claim covers everything the model is handed.
+     */
+    'Useful context on the numbers: OPS+, wRC+, and ERA+ are scaled so 100 is average for the league',
+    'and level a line was produced at, and are adjusted for the park he played in, so they compare',
+    'players across teams and levels fairly.',
     'Minor-league stat lines are much weaker evidence than major-league ones.',
     '',
     // The same warning the briefing and the trade desk carry. The chat reads
@@ -589,6 +834,20 @@ function systemPrompt(orgId: number, persona: Persona): string {
     'After that, talk about him however you like. The app links names to their cards and files your',
     'advice against the right man, and it can do neither from a surname or a pronoun. This matters',
     'most on exactly the answers worth keeping: a plan for a pitcher is no use filed against nobody.',
+    '',
+    /*
+     * The tools that change something, said as narrowly as they are built. A
+     * model that is offered a write will use it to be helpful unless it is told
+     * not to, and the price of a note nobody asked for is a card to tidy. The
+     * last sentence is there because a model that has just called a tool will
+     * otherwise say "done" whether or not the tool agreed.
+     */
+    'You can keep a notebook for the GM in this app. watch_player and unwatch_player change the',
+    'watchlist; add_note files a note on a player card. They change this app only: nothing in OOTP',
+    'moves, and you cannot make a roster move, a signing or a trade. Use them when the GM asks, or',
+    'says yes to your offer, and never on your own. Afterwards say what you did in one short line,',
+    'such as "Added Gerrit Cole to the watchlist." If a tool reports an error, say so rather than',
+    'claiming it worked.',
     '',
     'The user can see the app around them, so point them at the relevant page when it helps',
     '("the Pitching Staff page has the full bullpen availability").',
@@ -739,13 +998,21 @@ function loadContext(orgId: number, persona: string): StoredContext | null {
   }
 }
 
+/** How many times the model may be asked within one answer. */
+const MAX_TURNS = 12;
+
 /**
  * One member of staff answering once: run the model, execute whatever tools it
  * asks for, feed the results back, repeat until it answers in plain text.
  *
  * Pulled out of the route so a room can run it once per person in turn.
+ *
+ * Ends early, by throwing, if `signal` fires. The route hands it the browser's
+ * connection, which Stop closes: a model run nobody is reading is money spent
+ * on an answer that gets thrown away, and one that has been told to change
+ * something should not carry on changing it.
  */
-async function runToolLoop(opts: {
+export async function runToolLoop(opts: {
   client: Anthropic | null;
   provider: ProviderId;
   key: string;
@@ -754,8 +1021,15 @@ async function runToolLoop(opts: {
   system: Anthropic.TextBlockParam[];
   messages: Anthropic.MessageParam[];
   send: (event: string, data: unknown) => void;
+  /** Who is speaking, so a note they file carries their name. */
+  speaker?: string;
+  /** Fires when the reader stops waiting. */
+  signal?: AbortSignal;
+  /** Settable so a test need not spend twelve turns to run out of them. */
+  maxTurns?: number;
 }): Promise<{ answer: string; refused: boolean }> {
-  const { client, provider, key, model, thinking, system, messages, send } = opts;
+  const { client, provider, key, model, thinking, system, messages, send, speaker, signal } = opts;
+  const maxTurns = opts.maxTurns ?? MAX_TURNS;
 
   /*
    * Another service answers through the adapter in providers.ts, which speaks
@@ -772,12 +1046,13 @@ async function runToolLoop(opts: {
       // The cache_control markers are Anthropic's; the text is the prompt
       system: system.map((b) => b.text).join('\n\n'),
       messages,
-      tools: TOOLS,
+      tools: CHAT_TOOLS,
       onText: (delta) => send('text', { delta }),
       onTool: (name) => send('tool', { name }),
-      runTool: (name, input) => runTool(name, input),
+      runTool: (name, input) => runChatTool(name, input, speaker),
       onFallback: (notice) => send('notice', notice),
-      maxTurns: 12,
+      maxTurns,
+      signal,
     });
   }
 
@@ -789,23 +1064,36 @@ async function runToolLoop(opts: {
    */
   stripProviderExtras(messages);
   let answer = '';
-  for (let turn = 0; turn < 12; turn++) {
+  let finished = false;
+  for (let turn = 0; turn < maxTurns; turn++) {
+    // Between turns is the cheapest place to stop: nothing is in flight
+    throwIfStopped(signal);
     markCachePoint(messages);
-    const stream = client.messages.stream({
-      model,
-      max_tokens: 8000,
-      ...(thinking ? { thinking } : {}),
-      system,
-      tools: TOOLS,
-      messages,
-    });
+    const stream = client.messages.stream(
+      {
+        model,
+        max_tokens: 8000,
+        ...(thinking ? { thinking } : {}),
+        system,
+        tools: CHAT_TOOLS,
+        messages,
+      },
+      { signal }
+    );
 
     stream.on('text', (delta) => {
       answer += delta;
       send('text', { delta });
     });
 
-    const message = await stream.finalMessage();
+    let message: Anthropic.Message;
+    try {
+      message = await stream.finalMessage();
+    } catch (err) {
+      // However the SDK words an abort, a run the reader stopped is a stop
+      throwIfStopped(signal);
+      throw err;
+    }
     if (message.stop_reason === 'refusal') {
       send('error', { message: 'The model declined to answer that.' });
       return { answer, refused: true };
@@ -816,13 +1104,18 @@ async function runToolLoop(opts: {
     const toolUses = message.content.filter(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
     );
-    if (toolUses.length === 0) break;
+    if (toolUses.length === 0) {
+      finished = true;
+      break;
+    }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const use of toolUses) {
+      // Not started once the reader has stopped waiting: some tools change something
+      throwIfStopped(signal);
       send('tool', { name: use.name });
       try {
-        const output = await runTool(use.name, (use.input ?? {}) as Record<string, unknown>);
+        const output = await runChatTool(use.name, (use.input ?? {}) as Record<string, unknown>, speaker);
         results.push({ type: 'tool_result', tool_use_id: use.id, content: output });
       } catch (err) {
         results.push({
@@ -836,7 +1129,8 @@ async function runToolLoop(opts: {
     // All results for one assistant turn go back in a single user message
     messages.push({ role: 'user', content: results });
   }
-  return { answer, refused: false };
+  // Narration streamed along the way is not an answer: only a last turn that asked for nothing is
+  return finishLoop((delta) => send('text', { delta }), answer, finished);
 }
 
 /** At most this many voices in a room: past four it stops being a conversation. */
@@ -880,6 +1174,19 @@ chatRoutes.post('/chat', async (req, res) => {
   const aimedAt = isRoom && addressed ? room.find((p) => p.id === addressed) : undefined;
   const speakers = isRoom ? (aimedAt ? [aimedAt] : room.length > 0 ? room : [roster[0]]) : [solo];
 
+  /*
+   * Stop. The page says it by closing this request, so that is what ends the
+   * model run. Cancelling only the browser's side left the server asking the
+   * model, running tools and paying for an answer nobody was there to read.
+   * Listened for on the response: a request's own `close` means its body has
+   * been read, not that the reader has gone. And `close` also fires for a
+   * response that finished, which is not a stop.
+   */
+  const stop = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) stop.abort();
+  });
+
   // Server-sent events: the answer streams in, and tool calls are announced as
   // they happen so the user sees the assistant working rather than a spinner.
   res.setHeader('Content-Type', 'text/event-stream');
@@ -887,6 +1194,8 @@ chatRoutes.post('/chat', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
   const send = (event: string, data: unknown): void => {
+    // Nobody left to tell
+    if (res.destroyed || res.writableEnded) return;
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
@@ -898,7 +1207,7 @@ chatRoutes.post('/chat', async (req, res) => {
   // take it is a 400, and the model is now the user's choice rather than ours.
   const thinking: Anthropic.ThinkingConfigParam | undefined =
     (await supportsAdaptiveThinking(model)) ? { type: 'adaptive' } : undefined;
-  const loop = { client, provider, key, model, thinking, send };
+  const loop = { client, provider, key, model, thinking, send, signal: stop.signal };
 
   try {
     if (!isRoom) {
@@ -915,7 +1224,7 @@ chatRoutes.post('/chat', async (req, res) => {
       const system: Anthropic.TextBlockParam[] = [
         { type: 'text', text: systemPrompt(team, persona), cache_control: { type: 'ephemeral' } },
       ];
-      const { answer } = await runToolLoop({ ...loop, system, messages });
+      const { answer } = await runToolLoop({ ...loop, system, messages, speaker: persona.name });
 
       // Only a completed answer is stored. A transcript left ending on a tool
       // call whose result never arrived is one the API refuses outright, so a
@@ -982,17 +1291,24 @@ chatRoutes.post('/chat', async (req, res) => {
                 'rather than saying whose call it is — he already knows, which is why he asked you.'
               : '') +
             ' You may be joining a conversation already under way; read what has been said before ' +
-            'adding to it, and do not reintroduce yourself or restate ground already covered.',
+            'adding to it, and do not reintroduce yourself or restate ground already covered.' +
+            ' If the general manager asked for something to be put on the watchlist or filed, and a ' +
+            'colleague has already done it, say so rather than doing it a second time.',
           cache_control: { type: 'ephemeral' },
         },
       ];
 
-      const { answer, refused } = await runToolLoop({ ...loop, system, messages });
+      const { answer, refused } = await runToolLoop({
+        ...loop, system, messages, speaker: person.name,
+      });
       saidThisTurn.push({ name: person.name, role: person.role, text: answer });
       if (refused) break;
     }
     send('done', {});
   } catch (err) {
+    // Stopped: nobody is reading, and nothing is stored, so the transcript on
+    // disk stays the last good one rather than ending on a tool call with no result
+    if (stop.signal.aborted) return;
     const e = err as Error & { status?: number };
     const message = getApiKey() ? describeError(activeProvider(), e) : NO_KEY_MESSAGE;
     send('error', { message });

@@ -225,8 +225,136 @@ const TRADE_PLAYER_COLUMNS = Array.from({ length: 10 }, (_, i) => [
   `player_id_1_${i}`,
 ]).flat();
 
-export function recentTransactions(orgId: number, limit = 200): Transaction[] {
+/** How many deals a page holds unless the caller asks for another number. */
+const PAGE_SIZE = 200;
+/** The most one page may hold, so a stray number cannot read out the whole league. */
+const MAX_PAGE_SIZE = 500;
+/** A date key no deal can be later than: the cut-off when none was asked for. */
+const NO_CUT = 99991231;
+
+export interface TransactionPage {
+  transactions: Transaction[];
+  /** Whether older deals exist behind this page, so the reader can be offered them. */
+  hasMore: boolean;
+}
+
+/** A query-string number, or the fallback where it is absent or not a number. */
+function whole(value: unknown, fallback: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Math.trunc(Number(value));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * One page of the feed, newest first.
+ *
+ * The page was a fixed two hundred deals with nothing behind them. It read "200
+ * of 200" as though that were everything, and a reader looking for what happened
+ * at last season's deadline had no way to get there from the newest deal. This
+ * serves the same feed a slice at a time: `offset` deals from the newest, `limit`
+ * of them, and optionally only those on or before a date. The defaults are the
+ * old behaviour, which is what the recap and the paper still ask for.
+ *
+ * A page is the same slice of the same list whichever page it is. That is what
+ * lets "load more" append without repeating a deal or skipping one, so nothing
+ * in how the list is built may depend on how much of it was asked for.
+ */
+export function transactionPage(
+  orgId: number,
+  opts: { limit?: unknown; offset?: unknown; before?: unknown } = {}
+): TransactionPage {
+  const limit = Math.min(Math.max(whole(opts.limit, PAGE_SIZE), 1), MAX_PAGE_SIZE);
+  const offset = Math.max(whole(opts.offset, 0), 0);
+  // A date that cannot be read is no cut-off at all, not an empty feed
+  const upTo = dateKey(opts.before);
+  // One past the end of the page, so whether there is more needs no count
+  const feed = collect(orgId, offset + limit + 1, upTo);
+  return { transactions: feed.slice(offset, offset + limit), hasMore: feed.length > offset + limit };
+}
+
+/** The newest deals, however many are wanted. The AI prompts ask for a short list this way. */
+export function recentTransactions(orgId: number, limit = PAGE_SIZE): Transaction[] {
+  return transactionPage(orgId, { limit }).transactions;
+}
+
+/**
+ * The league's news as transactions: the signings and the waiver claims.
+ *
+ * Trades are in this table as well — every one of the 232 in my own save
+ * matches a message — so they are excluded by the id the trade table already
+ * carries rather than by guessing from the wording.
+ *
+ * The newest `take` of them on or before the date key `cut`.
+ */
+function news(ours: Set<number>, cut: number, take: number): Transaction[] {
   const out: Transaction[] = [];
+  if (!tableExists('messages') || !hasColumns('messages', 'subject', 'date', 'message_type')) {
+    return out;
+  }
+  /*
+   * The trades are left out in the query, before the LIMIT, and not afterwards.
+   * Dropping them from the newest two hundred messages leaves however many were
+   * not trades, which is a different number every time the window moves — and
+   * a page that is short by a different amount each time cannot be followed by
+   * the next one.
+   */
+  const unlessTrade =
+    tableExists('trade_history') && hasColumns('trade_history', 'message_id')
+      ? `AND COALESCE(message_id, -1) NOT IN
+           (SELECT message_id FROM trade_history WHERE message_id IS NOT NULL)`
+      : '';
+  const rows = db
+    /*
+     * No league filter. A reader claimed a man off waivers and signed him to
+     * an extension, and neither appeared: OOTP records a waiver claim with
+     * every id on the row set to zero — no club, no player, no league — so a
+     * filter asking for his league threw away the one row that was his. The
+     * message type is the only thing worth filtering on here.
+     */
+    .prepare(
+      `SELECT message_id, subject, date, message_type, team_id_0, team_id_1, player_id_0,
+              recipient_id
+       FROM messages
+       WHERE message_type IN (?, ?) AND COALESCE(deleted, 0) = 0
+         AND COALESCE(${DATE_KEY('date')}, 0) <= ? ${unlessTrade}
+       ORDER BY ${DATE_KEY('date')} DESC, message_id DESC LIMIT ?`
+    )
+    .all(TRADE_MESSAGE, SIGNING_MESSAGE, cut, take) as Array<Record<string, unknown>>;
+  for (const r of rows) {
+    const subject = String(r.subject ?? '');
+    const teams = [Number(r.team_id_0 ?? 0), Number(r.team_id_1 ?? 0)].filter((n) => n > 0);
+    const players = [Number(r.player_id_0 ?? 0)].filter((n) => n > 0);
+    // A claim is worth telling apart from a signing: it is a man another
+    // club has just let go of, which is the case he asked to be shown
+    const claim = /waiv|claim/i.test(subject);
+    out.push({
+      date: padDate(r.date),
+      dateKey: dateKey(r.date),
+      kind: claim ? 'waiver' : 'signing',
+      summary: parseSummary(subject),
+      plain: plainSummary(subject),
+      teams,
+      players,
+      /*
+       * A waiver claim names no club at all, so the ordinary test cannot see
+       * whose it was. What it does carry is who OOTP sent it to, and a claim
+       * reported to the manager is his own business by construction. The
+       * same reasoning is NOT extended to signings: those name a club, and
+       * "X signs with Los Angeles" arrives in his post without being his.
+       */
+      yours: teams.some((t) => ours.has(t)) || (claim && Number(r.recipient_id ?? 0) === 1),
+    });
+  }
+  return out;
+}
+
+/**
+ * The newest `take` deals on or before `upTo` (a date key; 0 for no cut-off),
+ * newest first.
+ */
+function collect(orgId: number, take: number, upTo: number): Transaction[] {
+  const out: Transaction[] = [];
+  const cut = upTo || NO_CUT;
 
   const org = db.prepare(`SELECT league_id FROM teams WHERE team_id = ?`).get(orgId) as
     | { league_id: number }
@@ -246,11 +374,18 @@ export function recentTransactions(orgId: number, limit = 200): Transaction[] {
   );
 
   if (tableExists('trade_history') && hasColumns('trade_history', 'date', 'summary')) {
+    /*
+     * Ties on a date are broken by row, so the order is total. SQL promises
+     * nothing about the order of equal dates, and a page is only the same
+     * slice of the same list if every query agrees on it, whatever its LIMIT.
+     */
     const rows = db
       .prepare(
-        `SELECT * FROM trade_history ORDER BY ${DATE_KEY('date')} DESC LIMIT ?`
+        `SELECT * FROM trade_history
+         WHERE COALESCE(${DATE_KEY('date')}, 0) <= ?
+         ORDER BY ${DATE_KEY('date')} DESC, rowid DESC LIMIT ?`
       )
-      .all(limit) as Array<Record<string, unknown>>;
+      .all(cut, take) as Array<Record<string, unknown>>;
     for (const r of rows) {
       const players = TRADE_PLAYER_COLUMNS.map((c) => Number(r[c] ?? 0)).filter((n) => n > 0);
       const teams = [Number(r.team_id_0 ?? 0), Number(r.team_id_1 ?? 0)].filter((n) => n > 0);
@@ -268,62 +403,8 @@ export function recentTransactions(orgId: number, limit = 200): Transaction[] {
     }
   }
 
-  /*
-   * Signings and waiver claims. Trades are in this table as well — every one of
-   * the 232 in my own save matches a message — so they are excluded by the id
-   * the trade table already carries rather than by guessing from the wording.
-   */
-  if (tableExists('messages') && hasColumns('messages', 'subject', 'date', 'message_type')) {
-    const traded = new Set(
-      tableExists('trade_history')
-        ? (db.prepare(`SELECT message_id FROM trade_history`).all() as Array<{ message_id: number }>)
-            .map((m) => m.message_id)
-        : []
-    );
-    const rows = db
-      /*
-       * No league filter. A reader claimed a man off waivers and signed him to
-       * an extension, and neither appeared: OOTP records a waiver claim with
-       * every id on the row set to zero — no club, no player, no league — so a
-       * filter asking for his league threw away the one row that was his. The
-       * message type is the only thing worth filtering on here.
-       */
-      .prepare(
-        `SELECT message_id, subject, date, message_type, team_id_0, team_id_1, player_id_0,
-                recipient_id
-         FROM messages
-         WHERE message_type IN (?, ?) AND COALESCE(deleted, 0) = 0
-         ORDER BY ${DATE_KEY('date')} DESC LIMIT ?`
-      )
-      .all(TRADE_MESSAGE, SIGNING_MESSAGE, limit) as Array<Record<string, unknown>>;
-    for (const r of rows) {
-      if (traded.has(Number(r.message_id))) continue;
-      const subject = String(r.subject ?? '');
-      const teams = [Number(r.team_id_0 ?? 0), Number(r.team_id_1 ?? 0)].filter((n) => n > 0);
-      const players = [Number(r.player_id_0 ?? 0)].filter((n) => n > 0);
-      // A claim is worth telling apart from a signing: it is a man another
-      // club has just let go of, which is the case he asked to be shown
-      const claim = /waiv|claim/i.test(subject);
-      out.push({
-        date: padDate(r.date),
-        dateKey: dateKey(r.date),
-        kind: claim ? 'waiver' : 'signing',
-        summary: parseSummary(subject),
-        plain: plainSummary(subject),
-        teams,
-        players,
-        /*
-         * A waiver claim names no club at all, so the ordinary test cannot see
-         * whose it was. What it does carry is who OOTP sent it to, and a claim
-         * reported to the manager is his own business by construction. The
-         * same reasoning is NOT extended to signings: those name a club, and
-         * "X signs with Los Angeles" arrives in his post without being his.
-         */
-        yours: teams.some((t) => ours.has(t)) || (claim && Number(r.recipient_id ?? 0) === 1),
-      });
-    }
-  }
-
+  // Signings and waiver claims, from the league's news
+  out.push(...news(ours, cut, take));
   /*
    * Deals that changed since the last export.
    *
@@ -342,10 +423,22 @@ export function recentTransactions(orgId: number, limit = 200): Transaction[] {
    * Putting a day on it would be inventing precision to match the rows above,
    * and those rows earned their dates.
    */
-  for (const c of contractChanges(orgId)) {
+  const changes = contractChanges(orgId);
+  /*
+   * Whether the news told of a deal is judged against the newest two hundred
+   * signings, whichever page is being read. It used to be judged against the
+   * stories that happened to be loaded, so a contract line could stand on the
+   * first page and its news story on the second.
+   */
+  const told =
+    changes.length > 0
+      ? news(ours, NO_CUT, PAGE_SIZE).filter((t) => t.kind === 'signing')
+      : [];
+  for (const c of changes) {
     // Already reported by name in the news, and the news said it better
-    if (out.some((t) => t.kind === 'signing' && t.players.includes(c.player_id))) continue;
-    if (out.some((t) => t.kind === 'signing' && t.plain.includes(c.name))) continue;
+    if (told.some((t) => t.players.includes(c.player_id))) continue;
+    if (told.some((t) => t.plain.includes(c.name))) continue;
+    if (dateKey(c.to) > cut) continue;
     const raw =
       c.was !== null && c.years > c.was
         ? `<${c.name}:player#${c.player_id}> signed for ${c.years} year${c.years === 1 ? '' : 's'}.`
@@ -364,7 +457,7 @@ export function recentTransactions(orgId: number, limit = 200): Transaction[] {
   }
 
   // Newest first, on the date read as a number — OOTP writes them unpadded
-  return out.sort((a, b) => b.dateKey - a.dateKey).slice(0, limit);
+  return out.sort((a, b) => b.dateKey - a.dateKey).slice(0, take);
 }
 
 /** `2027-5-9` becomes 20270509, so the ninth stops outranking the twenty-third. */
@@ -373,13 +466,23 @@ function dateKey(raw: unknown): number {
   return m ? Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]) : 0;
 }
 
+/**
+ * `?limit=` and `?offset=` page through the feed, and `?before=2030-06-09` stops
+ * it at a day. None is needed: without them this is the newest two hundred, as
+ * it always was. `yours` counts the deals on this page, not the whole feed.
+ */
 transactionRoutes.get('/transactions/:orgId', (req, res) => {
   const orgId = Number(req.params.orgId);
   if (!tableExists('teams')) return res.status(400).json({ error: 'No data imported yet' });
-  const all = recentTransactions(orgId);
+  const { transactions, hasMore } = transactionPage(orgId, {
+    limit: req.query.limit,
+    offset: req.query.offset,
+    before: req.query.before,
+  });
   res.json({
-    transactions: all,
-    yours: all.filter((t) => t.yours).length,
+    transactions,
+    yours: transactions.filter((t) => t.yours).length,
+    hasMore,
     /*
      * Said plainly where the export has none. A league that has not traded
      * yet and an app that cannot read trades look identical otherwise.

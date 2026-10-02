@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { statsFor, type StatDef, type StatGroup } from './stats';
+import { stepIndex } from './Nav';
 
 const SECTIONS: Array<StatDef['section']> = ['Counting', 'Rate', 'Advanced'];
 
@@ -13,6 +14,30 @@ export function ColumnPicker({
   onReset: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  // What had focus when the picker opened, which is the button that opened it.
+  // Kept in a ref so that a second pass over the effect below, which React makes
+  // in development, does not take the first box — where focus has gone by then —
+  // for it.
+  const opener = useRef<HTMLElement | null | undefined>(undefined);
+
+  // Focus goes into the list when the picker opens and back to its button when
+  // it closes, however it closes. A keyboard that opened it from the button
+  // would otherwise be left on the button with forty boxes to Tab through.
+  useEffect(() => {
+    if (opener.current === undefined) {
+      const at = document.activeElement;
+      opener.current = at instanceof HTMLElement && at !== document.body ? at : null;
+    }
+    ref.current?.querySelector<HTMLElement>('input')?.focus();
+    return () => {
+      const to = opener.current;
+      const now = document.activeElement;
+      // Only if focus went down with the picker: a click on something else has
+      // already put it where the reader wants it
+      if (to?.isConnected && (now === null || now === document.body)) to.focus();
+    };
+  }, []);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -37,11 +62,22 @@ export function ColumnPicker({
     onChange(next);
   };
 
+  // Arrow keys, Home and End move between the boxes, as they would in a menu;
+  // the two buttons are left to Tab
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!(e.target instanceof HTMLInputElement)) return;
+    const boxes = Array.from(e.currentTarget.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    const to = stepIndex(e.key, boxes.indexOf(e.target), boxes.length);
+    if (to === null) return;
+    e.preventDefault();
+    boxes[to]?.focus();
+  };
+
   return (
-    <div className="col-picker" ref={ref}>
+    <div className="col-picker" ref={ref} role="dialog" aria-labelledby={titleId} onKeyDown={onKeyDown}>
       <div className="col-picker-head">
-        <strong>{group === 'batting' ? 'Batting' : 'Pitching'} columns</strong>
-        <button className="chip-x" onClick={onClose}>✕</button>
+        <strong id={titleId}>{group === 'batting' ? 'Batting' : 'Pitching'} columns</strong>
+        <button className="chip-x" onClick={onClose} aria-label="Close column picker">✕</button>
       </div>
       <div className="col-picker-body">
         {SECTIONS.map((section) => (

@@ -90,6 +90,10 @@ ollama pull qwen2.5:14b
 Avoid models with small context windows (gemma2, for instance, caps at 8k) —
 they cannot hold these prompts whatever you set above.
 
+The staff chat and the trade desk also need a model that supports tools, because
+they look things up in your save as they go. llama3.1 and qwen2.5 do; dolphin3
+and gemma2 do not, and the app will say so rather than guess.
+
 ## 4. Point the app at it
 
 1. Open **Settings** in OOTP Front Office.
@@ -109,8 +113,12 @@ a paid service.
 **"Ollama answered but has no models"** — Ollama is running, but nothing has been
 pulled yet. Go back to step 3.
 
-**A connection error** — Ollama is not running. Start it from Applications (Mac)
-or the Start menu (Windows) and look for the icon in the menu bar or system tray.
+**"Could not reach Ollama"** — Ollama is not running, or the address in Settings
+is wrong. Start it from Applications (Mac) or the Start menu (Windows) and look
+for the icon in the menu bar or system tray.
+
+**"The model ... does not support tools"** — the staff chat and the trade desk
+need a model with tool support. Pick one that has it (step 3) in Settings.
 
 **Thin or nonsense writing, or "returned an issue with no front page"** — almost
 always the context window. Go back to step 2 and make sure you restarted Ollama

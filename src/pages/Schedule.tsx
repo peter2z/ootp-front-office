@@ -3,6 +3,7 @@ import { apiGet } from '../api';
 import { PlayerLink } from '../playerModal';
 import { TeamLogo } from '../TeamLogo';
 import { GamePlan } from '../GamePlan';
+import { navigate, useRoute, type RouteParams } from '../route';
 
 interface Probable { player_id: number; name: string; throws: string }
 interface Game {
@@ -51,13 +52,45 @@ function shortDate(iso: string): string {
 }
 const dateRange = (a: string, b: string) => (a === b ? shortDate(a) : `${shortDate(a)} – ${shortDate(b)}`);
 
+/**
+ * The game a link names, or null. `game` in the address is a game id; anything
+ * else in it is somebody's typo and names no game.
+ */
+export function plannedGame(params: RouteParams): number | null {
+  const n = params.game !== undefined && /^\d+$/.test(params.game) ? Number(params.game) : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 export function Schedule({ teamId }: { teamId: number }) {
   const [data, setData] = useState<ScheduleData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'upcoming' | 'played'>('all');
-  /** Which game's plan is open. One at a time — this is a page you scan. */
-  const [planGame, setPlanGame] = useState<number | null>(null);
+  const { params, player } = useRoute();
+  /*
+   * Which game's plan is open. One at a time, since this is a page you scan.
+   *
+   * It is kept in the address rather than in the page, so a link can name the
+   * game: the dashboard's Up Next rows and the lineup's banner both do, and the
+   * plan is open when the Schedule is. A reload or a bookmark lands on the same
+   * plan. Opening or closing one rewrites the entry instead of adding one,
+   * because it is not a step worth undoing; Back still goes to where the link
+   * was followed from.
+   */
+  const planGame = plannedGame(params);
+  const showPlan = (game: number | null) =>
+    navigate('schedule', { ...params, game }, { replace: true, player });
   const nextRef = useRef<HTMLDivElement>(null);
+  const planRef = useRef<HTMLDivElement>(null);
+  /** A plan that came with the page, named by a link, and not yet scrolled to. */
+  const landing = useRef(planGame !== null);
+  // Its series is scrolled to from the top once the plan has arrived. Before
+  // then the plan is a line saying it is working, the page is not tall enough
+  // to put the series at the top, and the plan would be left below the fold
+  const landOnPlan = () => {
+    if (!landing.current) return;
+    landing.current = false;
+    planRef.current?.scrollIntoView({ block: 'start' });
+  };
 
   useEffect(() => {
     setData(null);
@@ -65,9 +98,17 @@ export function Schedule({ teamId }: { teamId: number }) {
     apiGet<ScheduleData>(`/api/schedule/${teamId}`).then(setData).catch((e) => setError(e.message));
   }, [teamId]);
 
-  // Land on the current series rather than opening in March
+  // Land on the current series rather than opening in March, or on the series
+  // of the game a link named, which waits for its plan (see landOnPlan)
   useEffect(() => {
-    if (data && filter === 'all') nextRef.current?.scrollIntoView({ block: 'center' });
+    if (!data || filter !== 'all') return;
+    if (planRef.current) {
+      if (!landing.current) planRef.current.scrollIntoView({ block: 'start' });
+    } else {
+      // The link named a game that is not here, so there is no plan to wait for
+      landing.current = false;
+      nextRef.current?.scrollIntoView({ block: 'center' });
+    }
   }, [data, filter]);
 
   if (error) return <div className="banner error">{error}</div>;
@@ -76,6 +117,9 @@ export function Schedule({ teamId }: { teamId: number }) {
   const shown = data.series.filter((s) =>
     filter === 'all' ? true : filter === 'played' ? s.played || s.inProgress : !s.played
   );
+  // A link from another save, or another club, or a typo: say so rather than open nothing
+  const planMissing =
+    planGame !== null && !data.series.some((s) => s.games.some((g) => g.game_id === planGame));
 
   return (
     <div>
@@ -128,14 +172,19 @@ export function Schedule({ teamId }: { teamId: number }) {
         </div>
       </div>
 
+      {planMissing && (
+        <p className="muted hint-line">The game in this link is not on this club&rsquo;s schedule.</p>
+      )}
+
       <div className="series-list">
         {shown.map((s, i) => {
           const isNext = data.series.indexOf(s) === data.nextSeriesIndex;
+          const holdsPlan = planGame !== null && s.games.some((g) => g.game_id === planGame);
           return (
             <div
               key={`${s.oppId}-${s.startDate}-${i}`}
               className={`series-card ${isNext ? 'series-next' : ''} ${s.played ? 'series-done' : ''}`}
-              ref={isNext ? nextRef : undefined}
+              ref={holdsPlan ? planRef : isNext ? nextRef : undefined}
             >
               <div className="series-head">
                 <TeamLogo teamId={s.oppId} size={50} className="logo-sm" />
@@ -212,7 +261,7 @@ export function Schedule({ teamId }: { teamId: number }) {
                       <td className="series-plan">
                         <button
                           className="link-button"
-                          onClick={() => setPlanGame(planGame === g.game_id ? null : g.game_id)}
+                          onClick={() => showPlan(planGame === g.game_id ? null : g.game_id)}
                         >
                           {planGame === g.game_id ? 'Hide' : 'Plan'}
                         </button>
@@ -221,8 +270,13 @@ export function Schedule({ teamId }: { teamId: number }) {
                   ))}
                 </tbody>
               </table>
-              {planGame !== null && s.games.some((g) => g.game_id === planGame) && (
-                <GamePlan teamId={teamId} gameId={planGame} onClose={() => setPlanGame(null)} />
+              {planGame !== null && holdsPlan && (
+                <GamePlan
+                  teamId={teamId}
+                  gameId={planGame}
+                  onClose={() => showPlan(null)}
+                  onSettled={landOnPlan}
+                />
               )}
             </div>
           );
@@ -231,8 +285,10 @@ export function Schedule({ teamId }: { teamId: number }) {
 
       <p className="muted hint-line">
         Series are grouped from consecutive games against the same opponent at the same venue.
-        Starters for games already played are the actual ones; for upcoming games they come from
-        each club&rsquo;s projected rotation and will shift as the season is simmed.
+        Starters for games already played are the actual ones. For upcoming games they come from
+        each club&rsquo;s projected rotation, one turn for every game that club has left to play:
+        an off day uses none, a doubleheader uses two, and past the eight games OOTP projects the
+        rotation simply comes round again. They will shift as the season is simmed.
       </p>
     </div>
   );

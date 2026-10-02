@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { apiGet } from '../api';
 import { PlayerLink } from '../playerModal';
 import { Th } from '../Th';
@@ -6,12 +6,18 @@ import { Th } from '../Th';
 interface CrunchPlayer {
   player_id: number; name: string; age: number; positionName: string; levelName: string;
   on26: boolean; on40: boolean; optionsUsed: number; rule5Protected: number; issues: string[];
+  /** On the 60-day IL: still on the 40-man list, but not counted against the 40. */
+  il60: boolean;
+  note: string | null;
 }
 interface CrunchData {
-  counts: { active: number; fortyMan: number; issues: number };
+  counts: { active: number; fortyMan: number; issues: number; il60: number };
   issues: CrunchPlayer[];
   fortyMan: CrunchPlayer[];
 }
+
+/** The out-of-options line is a heads-up about a future move, not a limit being broken today. */
+const isHeadsUp = (issue: string) => issue.startsWith('Out of options');
 
 export function RosterCrunch({ orgId }: { orgId: number }) {
   const [data, setData] = useState<CrunchData | null>(null);
@@ -34,7 +40,11 @@ export function RosterCrunch({ orgId }: { orgId: number }) {
         </div>
         <div className="card">
           <span className="card-label">40-man</span>
-          <span className={`card-value ${data.counts.fortyMan >= 40 ? 'bad' : ''}`}>{data.counts.fortyMan}/40</span>
+          {/* Full is not a problem; over is. Men on the 60-day IL do not count, and the card says how many. */}
+          <span className={`card-value ${data.counts.fortyMan > 40 ? 'bad' : ''}`}>{data.counts.fortyMan}/40</span>
+          {data.counts.il60 > 0 && (
+            <span className="muted">+{data.counts.il60} on the 60-day IL, not counted</span>
+          )}
         </div>
         <div className="card">
           <span className="card-label">Needs attention</span>
@@ -56,7 +66,15 @@ export function RosterCrunch({ orgId }: { orgId: number }) {
                   <td>{p.positionName}</td>
                   <td>{p.age}</td>
                   <td><span className="level-tag">{p.levelName}</span></td>
-                  <td>{p.issues.map((i) => <span key={i} className="flag flag-hot">{i}</span>)}</td>
+                  {/* A space between chips, so copied or read-aloud text does not run the issues together */}
+                  <td>
+                    {p.issues.map((i, n) => (
+                      <Fragment key={i}>
+                        {n > 0 && ' '}
+                        <span className={isHeadsUp(i) ? 'flag' : 'flag flag-hot'}>{i}</span>
+                      </Fragment>
+                    ))}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -76,7 +94,7 @@ export function RosterCrunch({ orgId }: { orgId: number }) {
               <td>{p.positionName}</td>
               <td>{p.age}</td>
               <td><span className="level-tag">{p.levelName}</span></td>
-              <td>{p.on26 ? <span className="badge promote">Active</span> : <span className="flag">40-man</span>}</td>
+              <td>{p.on26 ? <span className="badge promote">Active</span> : <span className="flag">{p.note ?? '40-man'}</span>}</td>
               <td className="num">{p.optionsUsed}/3</td>
             </tr>
           ))}

@@ -1,6 +1,10 @@
 import { Router } from 'express';
 import { db, hasColumns, tableExists, tableColumns } from './db.js';
-import { LEVEL_NAMES } from './valuation.js';
+import { LEVEL_NAMES, ratingScaleMax } from './valuation.js';
+import { seasonFormByPlayer, type SeasonForm } from './form.js';
+import { rosterCrunch } from './rosterops.js';
+import { SERVICE_DAYS_PER_YEAR } from './contracts.js';
+import { healthOf } from './health.js';
 
 export const orgRoutes = Router();
 
@@ -105,15 +109,34 @@ interface OrgPlayer {
   potOa: number | null;
 }
 
-/** Prefer OOTP's exact grade; fall back when a save only carries the rounded one. */
-const VALUE_OA = tableExists('players_value') && tableColumns('players_value').includes('oa')
-  ? 'v.oa'
-  : 'v.oa_rating';
-const VALUE_POT = tableExists('players_value') && tableColumns('players_value').includes('pot')
-  ? 'v.pot'
-  : 'v.pot_rating';
+/**
+ * Prefer OOTP's exact grade; fall back when a save only carries the rounded one.
+ *
+ * Settled on first use rather than when the module loads. It was a constant,
+ * decided once by whichever database was open at start-up — an empty one on a
+ * first run, so the rounded grade stayed in use after the first import until
+ * the app was restarted, and a save switch kept the last save's choice.
+ */
+let gradeColumnChoice: { oa: string; pot: string } | null = null;
+
+function gradeColumns(): { oa: string; pot: string } {
+  if (gradeColumnChoice) return gradeColumnChoice;
+  // Empty when the table is not there, which falls back the same way
+  const have = tableColumns('players_value');
+  gradeColumnChoice = {
+    oa: have.includes('oa') ? 'v.oa' : 'v.oa_rating',
+    pot: have.includes('pot') ? 'v.pot' : 'v.pot_rating',
+  };
+  return gradeColumnChoice;
+}
+
+/** Called after an import, since a different save may carry different columns. */
+export function clearOrgCache(): void {
+  gradeColumnChoice = null;
+}
 
 function orgPlayers(orgId: number): OrgPlayer[] {
+  const grade = gradeColumns();
   return db
     .prepare(
       `SELECT p.player_id, p.team_id, p.first_name, p.last_name, p.age, p.position, p.role,
@@ -128,7 +151,7 @@ function orgPlayers(orgId: number): OrgPlayer[] {
               pi.pitching_ratings_overall_control AS ctl,
               pi.pitching_ratings_talent_stuff AS stuP, pi.pitching_ratings_talent_movement AS movP,
               pi.pitching_ratings_talent_control AS ctlP,
-              ${VALUE_OA} AS oa, ${VALUE_POT} AS potOa,
+              ${grade.oa} AS oa, ${grade.pot} AS potOa,
               /*
                * Whether he is on a roster anywhere.
                *
@@ -287,14 +310,30 @@ function seasonPitching(): Map<string, Record<string, number>> {
   return out;
 }
 
-const ops = (s: Record<string, number>): number | null => {
+/** Average, on-base and slugging from a summed line; null with no at-bats. */
+const slashOf = (s: Record<string, number>): { avg: number; obp: number; slg: number } | null => {
   const ab = s.ab ?? 0;
   if (!ab) return null;
   const singles = s.h - s.d - s.t - s.hr;
   const obpDen = ab + s.bb + s.hp + s.sf;
-  const obp = obpDen ? (s.h + s.bb + s.hp) / obpDen : 0;
-  const slg = (singles + 2 * s.d + 3 * s.t + 4 * s.hr) / ab;
-  return obp + slg;
+  return {
+    avg: s.h / ab,
+    obp: obpDen ? (s.h + s.bb + s.hp) / obpDen : 0,
+    slg: (singles + 2 * s.d + 3 * s.t + 4 * s.hr) / ab,
+  };
+};
+
+const ops = (s: Record<string, number>): number | null => {
+  const line = slashOf(s);
+  return line === null ? null : line.obp + line.slg;
+};
+
+/** ".198/.301/.385", the way the Lineup page and the box score write it. */
+const slashLine = (s: Record<string, number>): string | null => {
+  const line = slashOf(s);
+  if (line === null) return null;
+  const three = (v: number) => v.toFixed(3).replace(/^0\./, '.');
+  return `${three(line.avg)}/${three(line.obp)}/${three(line.slg)}`;
 };
 
 /**
@@ -342,6 +381,24 @@ const POSITION_NAMES: Record<number, string> = {
   1: 'P', 2: 'C', 3: '1B', 4: '2B', 5: '3B', 6: 'SS', 7: 'LF', 8: 'CF', 9: 'RF', 10: 'DH',
 };
 
+/**
+ * A grade gap chosen on the 20-80 scale, carried onto the scale this save shows.
+ *
+ * Every gap on this page was picked on 20-80 — five points from his ceiling,
+ * fifteen of upside — and meant nothing on any other scale. On the 1-to-5
+ * scale every man is within five points of his ceiling, so the whole farm read
+ * "near ceiling — development mostly done", and nobody could ever show fifteen
+ * points of upside. The top of the scale is read off the data (ratingScaleMax),
+ * and a gap is the same share of it whichever scale writes it: 5 stays 5 on
+ * 20-80 and is about 0.3 on 1-5, and 15 is about 0.9.
+ */
+const onScale = (gapOn80: number): number => (gapOn80 * ratingScaleMax()) / 80;
+
+/** Within this of his ceiling (20-80 points), he is close to what he will be. */
+const NEAR_CEILING = 5;
+/** This far under it (20-80 points), there is real development still to come. */
+const HIGH_UPSIDE = 15;
+
 /** What calling a man up would actually cost, and whether it is worth it. */
 export interface CorrespondingMove {
   /** The weakest man at his spot on the big club — the one he would displace. */
@@ -352,6 +409,202 @@ export interface CorrespondingMove {
   bestAhead: { player_id: number; name: string; cur: number | null } | null;
   blocked: boolean;
   note: string;
+  /**
+   * Set when the move is a call-up of a man who is not on the 40-man and the
+   * 40-man is full: a place on it has to be found first, and this names the
+   * man who could most cheaply give his up, when anybody obviously can.
+   */
+  fortyMan: {
+    count: number;
+    limit: number;
+    comesOff: { player_id: number; name: string; why: string } | null;
+  } | null;
+}
+
+/** The 40-man limit, written the way the 40-Man Roster page writes it. */
+export const FORTY_MAN_LIMIT = 40;
+
+/**
+ * Options and the five-year line, drawn where server/rosterops.ts draws them
+ * for the 40-Man Roster page (it keeps its own copies private): a man who has
+ * used all three options and has under five years of service cannot be sent
+ * down without clearing waivers, so he is the one a full roster forces out.
+ * Past five years he can refuse the assignment anyway, and the missing option
+ * costs the club nothing.
+ */
+export const OPTIONS_ALLOWED = 3;
+const OPTION_FREE_SERVICE_YEARS = 5;
+
+/** Major-league service in years: exact from the days where the export has them. */
+export const serviceYearsOf = (
+  days: number | null | undefined, years: number | null | undefined
+): number => (typeof days === 'number' ? days / SERVICE_DAYS_PER_YEAR : years ?? 0);
+
+/** Out of options in the sense that binds the club. No count at all means the export does not say. */
+export function outOfOptions(optionsUsed: number | null | undefined, serviceYears: number): boolean {
+  return typeof optionsUsed === 'number' && optionsUsed >= OPTIONS_ALLOWED &&
+    serviceYears < OPTION_FREE_SERVICE_YEARS;
+}
+
+/** How long a man has to be out to go on the 60-day injured list. */
+const SIXTY_DAY_IL = 60;
+
+interface FortyManRoom {
+  /** Places taken, counted the way the 40-Man Roster page counts them. */
+  count: number;
+  /** Everyone on the 40-man list, the 60-day IL included. */
+  on: Set<number>;
+  comesOff: { player_id: number; name: string; why: string } | null;
+}
+
+/**
+ * Whether the organisation's 40-man has a place for a call-up, and if not, who
+ * could give his up.
+ *
+ * The farm page used to stop at the 26: it named the man a call-up would take
+ * the place of and never asked whether the call-up could go on the 40-man at
+ * all. A man who is not on it needs a place there as well, and on a full
+ * roster that is a second decision the page was leaving out.
+ *
+ * The count and the list are the 40-Man Roster page's own (rosterCrunch), so
+ * the two cannot disagree about whether the roster is full. Who could make way
+ * is read in two steps. A man out long enough for the 60-day list costs
+ * nothing to move there — that is what the list is for, and he stops counting
+ * the day he goes on it — so he comes first. After him, the lowest-graded man
+ * out of options: he cannot be sent down without clearing waivers anyway,
+ * which makes him the one a full roster puts in play. Beyond those two, whom
+ * the club values least is the reader's call and not a fact the save holds,
+ * so the page says the roster is full and leaves it there.
+ */
+function fortyManRoom(orgId: number, players: OrgPlayer[]): FortyManRoom | null {
+  const crunch = rosterCrunch(orgId);
+  if (!crunch) return null;
+
+  // Whichever of these the export carries; a missing one costs its own reading only
+  const have = new Set(tableColumns('players_roster_status'));
+  const col = (c: string) => `${have.has(c) ? `rs.${c}` : 'NULL'} AS ${c}`;
+  const injury = tableColumns('players').includes('injury_left') ? 'p.injury_left' : 'NULL';
+  const detail = new Map(
+    (
+      db
+        .prepare(
+          `SELECT rs.player_id,
+                  ${['is_active', 'is_on_dl', 'is_on_dl60', 'options_used', 'mlb_service_days', 'mlb_service_years']
+                    .map(col).join(', ')},
+                  ${injury} AS injury_left
+           FROM players_roster_status rs JOIN players p ON p.player_id = rs.player_id
+           WHERE p.organization_id = ? AND p.retired = 0`
+        )
+        .all(orgId) as Array<Record<string, number | null>>
+    ).map((r) => [r.player_id as number, r])
+  );
+  const grade = new Map(players.map((p) => [p.player_id, composites(p).cur]));
+
+  type Candidate = { player_id: number; name: string; cur: number | null; why: string };
+  const toTheSixty: Candidate[] = [];
+  const noOptions: Candidate[] = [];
+  for (const m of crunch.fortyMan) {
+    if (m.il60) continue; // already off the count, so moving him frees nothing
+    const d = detail.get(m.player_id);
+    if (!d) continue;
+    const him = { player_id: m.player_id, name: m.name, cur: grade.get(m.player_id) ?? null };
+    const health = healthOf(d);
+    if (health?.status === 'IL' && (health.daysLeft ?? 0) >= SIXTY_DAY_IL) {
+      toTheSixty.push({ ...him, why: 'to the 60-day IL' });
+    } else if (outOfOptions(d.options_used, serviceYearsOf(d.mlb_service_days, d.mlb_service_years))) {
+      noOptions.push({ ...him, why: 'out of options' });
+    }
+  }
+  const lowest = (xs: Candidate[]): Candidate | null =>
+    [...xs].sort((a, b) => (a.cur ?? Infinity) - (b.cur ?? Infinity))[0] ?? null;
+  const pick = lowest(toTheSixty) ?? lowest(noOptions);
+
+  return {
+    count: crunch.counts.fortyMan,
+    on: new Set(crunch.fortyMan.map((m) => m.player_id)),
+    comesOff: pick ? { player_id: pick.player_id, name: pick.name, why: pick.why } : null,
+  };
+}
+
+/** A man holding a place at the spot, with what the move needs to say about him. */
+interface Incumbent {
+  player_id: number;
+  name: string;
+  cur: number;
+  age: number;
+  /** This season at the big club's level, as the contracts page reads it. */
+  form: SeasonForm | null;
+  /** That season in the words the move prints, for when it is the reason. */
+  quote: string | null;
+}
+
+/**
+ * When a man graded above the call-up does not hold him off.
+ *
+ * Emil Morales — twenty-one, a 1.072 OPS at Double-A, ten home runs and 2.3
+ * WAR in 147 trips — was "blocked at 3B — Max Muncy grades 56 to his 41". The
+ * same Max Muncy was thirty-seven and hitting .198/.301/.385, an 87 wRC+; the
+ * dashboard had him cold, and the contracts page said "hold off" because the
+ * season did not back an extension. Those pages judged him on his season, this
+ * one on his scouting grade alone, and so they told the reader opposite things
+ * about the same man.
+ *
+ * So the season and the age come in here as they do there. The season is
+ * form.ts's reading, the one the contracts page uses, and it is only "poor" on
+ * a hundred plate appearances or twenty innings — a bad fortnight is not
+ * evidence. Either one excuses a grade lead, within limits (20-80 points):
+ *
+ *   a poor season   a lead of up to 20. A slump does not turn a 70 into a 40,
+ *                   and past two full grades the scouting is still the better
+ *                   guide: a hot Single-A bat graded 33 is not sent up to take
+ *                   the place of a 56, however cold the 56 is.
+ *   33 or older     a lead of up to 10. A veteran's small edge is not one he
+ *                   is going to keep, and the young man's is still growing.
+ *
+ * The bar is still the weakest man at the spot. A slump by the best player
+ * there does not open a place on the roster; the man who would come off is
+ * the weakest one, and only his lead can be excused.
+ */
+const SLUMP_LEAD = 20;
+const VETERAN_AGE = 33;
+const VETERAN_LEAD = 10;
+
+/** Why his grade lead does not hold the call-up off, or null when it does. */
+function whyNotInTheWay(m: Incumbent, cur: number): string | null {
+  const lead = m.cur - cur;
+  const slumping = m.form?.verdict === 'poor';
+  const veteran = m.age >= VETERAN_AGE;
+  const excused =
+    (slumping && lead <= onScale(SLUMP_LEAD)) || (veteran && lead <= onScale(VETERAN_LEAD));
+  if (!excused) return null;
+  return [
+    slumping ? m.quote ?? 'is having a poor season' : null,
+    veteran ? `is ${m.age}` : null,
+  ].filter(Boolean).join(' and ');
+}
+
+/**
+ * His season in the words the move prints: a slash line for a bat, an ERA for
+ * an arm. From his professional line at the big club's level, which is the
+ * line the Lineup and staff pages show, so the numbers match what the reader
+ * saw there.
+ */
+function seasonQuote(
+  m: OrgPlayer,
+  level: number,
+  batting: Map<string, Record<string, number>>,
+  pitching: Map<string, Record<string, number>>,
+  form: SeasonForm | null
+): string | null {
+  if (m.position === 1) {
+    const s = pitching.get(statKey(m.player_id, level));
+    if (s && (s.outs ?? 0) > 0) return `has a ${(((s.er ?? 0) / (s.outs / 3)) * 9).toFixed(2)} ERA this year`;
+  } else {
+    const s = batting.get(statKey(m.player_id, level));
+    const line = s ? slashLine(s) : null;
+    if (line) return `is hitting ${line} this year`;
+  }
+  return form?.line ? `is having a poor season (${form.line})` : null;
 }
 
 /**
@@ -375,8 +628,18 @@ export interface CorrespondingMove {
  * asked: he is not being made a starter, he is being given a place on the
  * roster. Where the grade is missing for either man no verdict is offered at
  * all, since the alternative is a recommendation resting on a blank.
+ *
+ * The incumbent's own season and age are the exception, and only his: the
+ * prospect's line has already earned him the look at his own level, but a
+ * veteran's grade lead can be undone by what he is doing in the majors this
+ * year, which the grade does not see. See {@link whyNotInTheWay}.
  */
-function correspondingMoves(orgId: number, players: OrgPlayer[]): Map<number, CorrespondingMove> {
+function correspondingMoves(
+  orgId: number,
+  players: OrgPlayer[],
+  batting: Map<string, Record<string, number>>,
+  pitching: Map<string, Record<string, number>>
+): Map<number, CorrespondingMove> {
   const out = new Map<number, CorrespondingMove>();
 
   /*
@@ -434,7 +697,12 @@ function correspondingMoves(orgId: number, players: OrgPlayer[]): Map<number, Co
   };
 
   const majors = players.filter(holdsAPlace);
-  const byPosition = new Map<number, Array<{ player_id: number; name: string; cur: number | null }>>();
+  // This season at the big club's own level, read the way the contracts page reads it
+  const form = seasonFormByPlayer(orgId);
+  const bigLevel =
+    (db.prepare(`SELECT level FROM teams WHERE team_id = ?`).get(orgId) as { level: number } | undefined)
+      ?.level ?? 1;
+  const byPosition = new Map<number, Incumbent[]>();
   for (const m of majors) {
     const { cur } = composites(m);
     if (cur === null) continue;
@@ -446,9 +714,35 @@ function correspondingMoves(orgId: number, players: OrgPlayer[]): Map<number, Co
      */
     const spot = m.position === 1 ? 1 : m.position;
     const list = byPosition.get(spot) ?? [];
-    list.push({ player_id: m.player_id, name: `${m.first_name} ${m.last_name}`, cur });
+    const season = form.get(m.player_id) ?? null;
+    list.push({
+      player_id: m.player_id,
+      name: `${m.first_name} ${m.last_name}`,
+      cur,
+      age: m.age,
+      form: season,
+      quote: seasonQuote(m, bigLevel, batting, pitching, season),
+    });
     byPosition.set(spot, list);
   }
+  // Only who and how good go out with the move; the rest is for the sentence
+  const named = (m: Incumbent) => ({ player_id: m.player_id, name: m.name, cur: m.cur });
+
+  /*
+   * A call-up of a man who is not on the 40-man needs a place there too. Said
+   * after the move rather than instead of it: the swap is still the right one
+   * or not on its merits, and the roster space is the next thing to sort out.
+   */
+  const room = fortyManRoom(orgId, players);
+  const withRoom = (playerId: number, move: CorrespondingMove): CorrespondingMove => {
+    if (move.blocked || !room || room.on.has(playerId) || room.count < FORTY_MAN_LIMIT) return move;
+    const off = room.comesOff;
+    return {
+      ...move,
+      note: `${move.note}; ${off ? `needs a 40-man spot: ${off.name} (${off.why})` : '40-man is full'}`,
+      fortyMan: { count: room.count, limit: FORTY_MAN_LIMIT, comesOff: off },
+    };
+  };
 
   for (const p of players) {
     if (p.team_id === orgId) continue; // already there
@@ -458,35 +752,52 @@ function correspondingMoves(orgId: number, players: OrgPlayer[]): Map<number, Co
     const incumbents = byPosition.get(spot);
     const where = POSITION_NAMES[spot] ?? `position ${spot}`;
     if (!incumbents || incumbents.length === 0) {
-      out.set(p.player_id, {
+      out.set(p.player_id, withRoom(p.player_id, {
         replaces: null, ahead: 0, bestAhead: null, blocked: false,
         note: `nobody at ${where} on the big club`,
-      });
+        fortyMan: null,
+      }));
       continue;
     }
-    const sorted = [...incumbents].sort((a, b) => (a.cur ?? 0) - (b.cur ?? 0));
+    const sorted = [...incumbents].sort((a, b) => a.cur - b.cur);
     const weakest = sorted[0];
-    const ahead = sorted.filter((m) => (m.cur ?? 0) >= cur);
-    const blocked = ahead.length === incumbents.length;
+    const ahead = sorted.filter((m) => m.cur >= cur);
     const best = sorted[sorted.length - 1];
-    out.set(p.player_id, {
-      replaces: blocked ? null : weakest,
+    /*
+     * A grade equal to the man in the way is not a reason to move anybody, so
+     * it counts as blocked — the tie goes to the roster you already have.
+     * Unless the weakest man's season or age says his grade is not the whole
+     * story, in which case his lead, a tie included, does not hold anyone off.
+     */
+    const excuse = weakest.cur >= cur ? whyNotInTheWay(weakest, cur) : null;
+    const blocked = weakest.cur >= cur && excuse === null;
+    out.set(p.player_id, withRoom(p.player_id, {
+      replaces: blocked ? null : named(weakest),
       ahead: ahead.length,
-      bestAhead: ahead.length > 0 ? best : null,
+      bestAhead: ahead.length > 0 ? named(best) : null,
       blocked,
-      /*
-       * A grade equal to the man in the way is not a reason to move anybody, so
-       * it counts as blocked — the tie goes to the roster you already have.
-       */
       note: blocked
         ? incumbents.length === 1
           ? `blocked at ${where} — ${best.name} grades ${best.cur} to his ${cur}`
           : `blocked at ${where} — all ${incumbents.length} graded above him, best ${best.name} at ${best.cur} to his ${cur}`
-        : `would take ${weakest.name}'s spot at ${where} — ${cur} to his ${weakest.cur}`,
-    });
+        : excuse !== null
+          ? `would take ${weakest.name}'s spot at ${where} — ${weakest.name} grades ${weakest.cur} to his ${cur}, but ${excuse}`
+          : `would take ${weakest.name}'s spot at ${where} — ${cur} to his ${weakest.cur}`,
+      fortyMan: null,
+    }));
   }
   return out;
 }
+
+/**
+ * The gaps a promotion case is made on, each read by the signal and by the Why
+ * column alike. They were two numbers apiece and had drifted apart: a hitter
+ * was flagged for promotion at .075 of OPS over his level and his reason was
+ * only written from .100, so a man between the two carried PROMOTE beside an
+ * empty Why.
+ */
+const OPS_CALL_UP = 0.075;
+const ERA_CALL_UP = 1.0;
 
 export function computeProspects(orgId: number): { batters: unknown[]; pitchers: unknown[]; baselines: unknown } {
   const batting = seasonBatting();
@@ -497,7 +808,7 @@ export function computeProspects(orgId: number): { batters: unknown[]; pitchers:
   const batters: unknown[] = [];
   const pitchers: unknown[] = [];
   const roster = orgPlayers(orgId);
-  const moves = correspondingMoves(orgId, roster);
+  const moves = correspondingMoves(orgId, roster, batting, pitching);
 
   /*
    * The bottom of the organisation, so nobody is told to send a man below it.
@@ -543,7 +854,7 @@ export function computeProspects(orgId: number): { batters: unknown[]; pitchers:
       const eraDiff = base.avgEra !== null ? base.avgEra - era : 0;
       const kDiff = base.avgKpct !== null ? kpct - base.avgKpct : 0;
       const reasons: string[] = [];
-      if (eraDiff >= 1.0) reasons.push(`ERA ${era.toFixed(2)} vs level avg ${base.avgEra!.toFixed(2)}`);
+      if (eraDiff >= ERA_CALL_UP) reasons.push(`ERA ${era.toFixed(2)} vs level avg ${base.avgEra!.toFixed(2)}`);
       /*
        * The case against him, said out loud. Without this a man carried a
        * DEMOTE badge beside an empty column: the app asserting something and
@@ -558,25 +869,32 @@ export function computeProspects(orgId: number): { batters: unknown[]; pitchers:
       }
       if (kDiff >= 0.05) reasons.push(`K% ${(kpct * 100).toFixed(0)} vs level avg ${(base.avgKpct! * 100).toFixed(0)}`);
       if (ageDiff !== null && ageDiff >= 1.5) reasons.push(`young for level (${p.age} vs avg ${base.avgAge!.toFixed(1)})`);
-      if (cur !== null && pot !== null && pot - cur <= 5) reasons.push('near ceiling — development mostly done');
+      if (cur !== null && pot !== null && pot - cur <= onScale(NEAR_CEILING)) reasons.push('near ceiling — development mostly done');
       const score = eraDiff * 12 + kDiff * 200 + (ageDiff ?? 0) * 8;
+      /*
+       * Demotion asks more than promotion does, on purpose. Sending a man
+       * down is the more consequential call and the easier one to get wrong,
+       * so it wants a bigger gap, a longer look, and — the part that matters
+       * most — a man who is not young for where he is. A nineteen-year-old
+       * struggling at Double-A is on schedule; a twenty-six-year-old
+       * struggling at Single-A is not the same sentence.
+       */
+      const signal =
+        eraDiff >= ERA_CALL_UP && ip >= 30 ? callUp(p.player_id)
+        : overmatched(eraDiff <= -1.25, ip >= 30, ageDiff, team.level) ? 'demote'
+        : score > 5 ? 'watch'
+        : null;
+      if (signal !== null && reasons.length === 0) {
+        reasons.push(biggestEdge([
+          [eraDiff * 12, `ERA ${era.toFixed(2)} vs level avg ${base.avgEra?.toFixed(2)}`],
+          [kDiff * 200, `K% ${(kpct * 100).toFixed(0)} vs level avg ${((base.avgKpct ?? 0) * 100).toFixed(0)}`],
+          [(ageDiff ?? 0) * 8, `young for level (${p.age} vs avg ${base.avgAge?.toFixed(1)})`],
+        ]));
+      }
       pitchers.push({
         ...common, role: p.role, ip: Number(ip.toFixed(1)), era: Number(era.toFixed(2)),
         kpct: Number((kpct * 100).toFixed(1)), war: s.war ?? 0,
-        score: Number(score.toFixed(1)), reasons,
-        /*
-         * Demotion asks more than promotion does, on purpose. Sending a man
-         * down is the more consequential call and the easier one to get wrong,
-         * so it wants a bigger gap, a longer look, and — the part that matters
-         * most — a man who is not young for where he is. A nineteen-year-old
-         * struggling at Double-A is on schedule; a twenty-six-year-old
-         * struggling at Single-A is not the same sentence.
-         */
-        signal:
-          eraDiff >= 1.0 && ip >= 30 ? callUp(p.player_id)
-          : overmatched(eraDiff <= -1.25, ip >= 30, ageDiff, team.level) ? 'demote'
-          : score > 5 ? 'watch'
-          : null,
+        score: Number(score.toFixed(1)), reasons, signal,
       });
     } else {
       const s = batting.get(statKey(p.player_id, team.level));
@@ -585,7 +903,7 @@ export function computeProspects(orgId: number): { batters: unknown[]; pitchers:
       if (o === null) continue;
       const opsDiff = base.avgOps !== null ? o - base.avgOps : 0;
       const reasons: string[] = [];
-      if (opsDiff >= 0.1) reasons.push(`OPS ${o.toFixed(3)} vs level avg ${base.avgOps!.toFixed(3)}`);
+      if (opsDiff >= OPS_CALL_UP) reasons.push(`OPS ${o.toFixed(3)} vs level avg ${base.avgOps!.toFixed(3)}`);
       // The case against him, for the same reason as the pitchers above
       if (opsDiff <= -0.1) {
         reasons.push(`OPS ${o.toFixed(3)} against a level average of ${base.avgOps!.toFixed(3)}`);
@@ -594,19 +912,37 @@ export function computeProspects(orgId: number): { batters: unknown[]; pitchers:
         }
       }
       if (ageDiff !== null && ageDiff >= 1.5) reasons.push(`young for level (${p.age} vs avg ${base.avgAge!.toFixed(1)})`);
-      if (cur !== null && pot !== null && pot - cur <= 5) reasons.push('near ceiling — development mostly done');
-      if (cur !== null && pot !== null && pot - cur >= 15) reasons.push('high remaining upside');
+      if (cur !== null && pot !== null && pot - cur <= onScale(NEAR_CEILING)) reasons.push('near ceiling — development mostly done');
+      if (cur !== null && pot !== null && pot - cur >= onScale(HIGH_UPSIDE)) reasons.push('high remaining upside');
       const score = opsDiff * 300 + (ageDiff ?? 0) * 8;
+      const signal =
+        opsDiff >= OPS_CALL_UP && s.pa >= 100 ? callUp(p.player_id)
+        : overmatched(opsDiff <= -0.100, s.pa >= 100, ageDiff, team.level) ? 'demote'
+        : score > 5 ? 'watch'
+        : null;
+      if (signal !== null && reasons.length === 0) {
+        reasons.push(biggestEdge([
+          [opsDiff * 300, `OPS ${o.toFixed(3)} vs level avg ${base.avgOps?.toFixed(3)}`],
+          [(ageDiff ?? 0) * 8, `young for level (${p.age} vs avg ${base.avgAge?.toFixed(1)})`],
+        ]));
+      }
       batters.push({
         ...common, pa: s.pa, opsVal: Number(o.toFixed(3)), hr: s.hr, sb: s.sb, war: s.war ?? 0,
-        score: Number(score.toFixed(1)), reasons,
-        signal:
-          opsDiff >= 0.075 && s.pa >= 100 ? callUp(p.player_id)
-          : overmatched(opsDiff <= -0.100, s.pa >= 100, ageDiff, team.level) ? 'demote'
-          : score > 5 ? 'watch'
-          : null,
+        score: Number(score.toFixed(1)), reasons, signal,
       });
     }
+  }
+
+  /**
+   * Whichever part of the score carried a man over the line, in words.
+   *
+   * Only reached when nothing else was said: a watch built out of two small
+   * edges, neither big enough for a reason of its own, would otherwise wear its
+   * badge beside an empty Why — the same fault the gap constants above fixed
+   * for promote.
+   */
+  function biggestEdge(edges: Array<[number, string]>): string {
+    return [...edges].sort((a, b) => b[0] - a[0])[0][1];
   }
 
   /**

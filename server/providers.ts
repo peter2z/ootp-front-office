@@ -222,6 +222,17 @@ function openAiCompatible(
 }
 
 /**
+ * What the SDK is handed in place of a key when it talks to a local server.
+ * A literal on purpose, and used wherever one is built: the address it posts to
+ * is a setting anybody can edit, so a key the caller happens to hold for some
+ * other service must not be what arrives there.
+ */
+const LOCAL_KEY = 'ollama';
+
+/** Said wherever a request would go to a local server with no model named. */
+const NO_LOCAL_MODEL = 'No local model chosen. Pick one in Settings — the list comes from Ollama.';
+
+/**
  * A model served from this machine.
  *
  * Two things differ from a paid service and both are handled here rather than
@@ -238,7 +249,7 @@ function openAiCompatible(
  */
 export function ollamaProvider(baseURL: string): Provider {
   const base = openAiCompatible(baseURL, () => true);
-  const connect = () => new OpenAI({ apiKey: 'ollama', baseURL });
+  const connect = () => new OpenAI({ apiKey: LOCAL_KEY, baseURL });
   return {
     ...base,
     async complete({ model, system, messages, maxTokens, schema }) {
@@ -248,7 +259,7 @@ export function ollamaProvider(baseURL: string): Provider {
        * answers with something unhelpful; this says what to do instead.
        */
       if (!model.trim()) {
-        throw new Error('No local model chosen. Pick one in Settings — the list comes from Ollama.');
+        throw new Error(NO_LOCAL_MODEL);
       }
       const response = await connect().chat.completions.create({
         model,
@@ -565,11 +576,94 @@ export interface ToolLoopOpts {
   maxTurns: number;
   /** Told when the chosen model could not be used and another answered. */
   onFallback?: (notice: FallbackNotice) => void;
+  /**
+   * Fires when nobody is waiting for the answer any more: the reader pressed
+   * Stop, or closed the page. The loop then stops asking the model anything,
+   * and cancels the request it has in flight.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ToolLoopResult {
   answer: string;
   refused: boolean;
+}
+
+/**
+ * Thrown out of a tool loop once its run has been stopped.
+ *
+ * Named AbortError so that anything which already knows to look for one still
+ * does. It is a class of its own because the services do not agree on what an
+ * abort looks like: Anthropic raises an error of its own, Google's fetch raises
+ * a DOMException, and OpenAI's stream raises nothing at all — it ends early and
+ * looks exactly like a model that has finished. Whatever the service did, the
+ * loop ends in this.
+ */
+export class StoppedError extends Error {
+  constructor() {
+    super('Stopped before the answer was finished.');
+    this.name = 'AbortError';
+  }
+}
+
+/** Ends the loop if its run has been stopped. Does nothing without a signal. */
+export function throwIfStopped(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new StoppedError();
+}
+
+/**
+ * Runs a loop, and reports anything thrown after the signal fired as the stop
+ * it was. A request torn down mid-flight comes out as whatever the SDK or the
+ * runtime makes of it — an APIUserAbortError, a DOMException, a bare
+ * "terminated" from the fetch underneath — and the caller wants one thing to
+ * look for, not three.
+ */
+async function whenStopped<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    throwIfStopped(signal);
+    throw err;
+  }
+}
+
+/**
+ * What the reader is told when a tool loop ends without having written an
+ * answer.
+ *
+ * A loop that spends its last turn on lookups has nothing left to return: each
+ * turn's text is dropped once its tool calls are answered, so what came back
+ * was the empty string. The chat drew no bubble at all and the trade desk
+ * printed a verdict with nothing in it, and neither said that a question had
+ * been asked — which reads as the app having lost it. Said in the place the
+ * answer would have been, it is at least something a person can act on.
+ */
+export const INCOMPLETE_RAN_OUT =
+  '[Incomplete: the lookups ran out before an answer was written. Ask again, or narrow the question.]';
+/** A model that stops asking for tools and says nothing is not the same failure as running out. */
+export const INCOMPLETE_EMPTY = '[Incomplete: the model sent back no answer. Ask again.]';
+
+/**
+ * What a loop returns once it has stopped asking for tools.
+ *
+ * `finished` is whether the model's last turn asked for nothing further. A loop
+ * can be unfinished and still hold text — the chat keeps the narration it
+ * streamed along the way — and can be finished and hold none, when a model
+ * answers a tool result with an empty message. Either way there is no answer,
+ * so the note is sent as text, where the reader will see it, and comes back as
+ * the answer, where the stored thread will keep it.
+ */
+export function finishLoop(
+  onText: (delta: string) => void,
+  answer: string,
+  finished: boolean
+): ToolLoopResult {
+  if (finished && answer.trim()) return { answer, refused: false };
+  const note = finished ? INCOMPLETE_EMPTY : INCOMPLETE_RAN_OUT;
+  // Set apart from any narration already written; with none before it, no gap
+  const text = answer.trim() ? `\n\n${note}` : note;
+  onText(text);
+  return { answer: answer.trim() ? answer + text : note, refused: false };
 }
 
 /** Text out of an Anthropic content block list, ignoring everything else. */
@@ -632,8 +726,11 @@ export function toOpenAiMessages(
 async function openAiToolLoop(o: ToolLoopOpts, baseURL?: string): Promise<ToolLoopResult> {
   const client = new OpenAI({ apiKey: o.key, ...(baseURL ? { baseURL } : {}) });
   let answer = '';
+  let finished = false;
 
   for (let turn = 0; turn < o.maxTurns; turn++) {
+    // Between turns is the cheapest place to stop: nothing is in flight
+    throwIfStopped(o.signal);
     const stream = await client.chat.completions.create({
       model: o.model,
       stream: true,
@@ -646,7 +743,7 @@ async function openAiToolLoop(o: ToolLoopOpts, baseURL?: string): Promise<ToolLo
           parameters: t.input_schema as Record<string, unknown>,
         },
       })),
-    });
+    }, { signal: o.signal });
 
     // Tool calls arrive in fragments identified by index, not by id
     const calls = new Map<number, { id: string; name: string; args: string }>();
@@ -667,8 +764,17 @@ async function openAiToolLoop(o: ToolLoopOpts, baseURL?: string): Promise<ToolLo
         calls.set(tc.index, slot);
       }
     }
+    /*
+     * An aborted stream does not raise: it ends, early, looking exactly like a
+     * model that has finished. Without this a stopped run goes on to hand back
+     * half a sentence, or to the next turn.
+     */
+    throwIfStopped(o.signal);
     if (refusal) return { answer, refused: true };
-    if (calls.size === 0) break;
+    if (calls.size === 0) {
+      finished = true;
+      break;
+    }
 
     const uses = [...calls.values()].filter((c) => c.name);
     o.messages.push({
@@ -688,7 +794,7 @@ async function openAiToolLoop(o: ToolLoopOpts, baseURL?: string): Promise<ToolLo
     // must not be replayed into the next turn's assistant block
     answer = '';
   }
-  return { answer, refused: false };
+  return finishLoop(o.onText, answer, finished);
 }
 
 /** Arguments arrive as a JSON string that a truncated stream can cut short. */
@@ -708,6 +814,8 @@ async function runAll(
 ): Promise<Anthropic.ToolResultBlockParam[]> {
   const results: Anthropic.ToolResultBlockParam[] = [];
   for (const use of uses) {
+    // Not started once the reader has stopped waiting: some tools change something
+    throwIfStopped(o.signal);
     o.onTool(use.name);
     try {
       results.push({
@@ -716,6 +824,8 @@ async function runAll(
         content: await o.runTool(use.name, use.input),
       });
     } catch (err) {
+      // A lookup cut short by the stop is not a tool that failed
+      throwIfStopped(o.signal);
       results.push({
         type: 'tool_result',
         tool_use_id: use.id,
@@ -806,6 +916,8 @@ async function geminiToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
   try {
     return await geminiLoop(o, o.model);
   } catch (err) {
+    // Stopping is no reason to write a model off, nor to go and ask another
+    throwIfStopped(o.signal);
     if (!modelUnavailable(err) || o.model === GEMINI_FALLBACK) throw err;
     remember(o.model, o.key, err);
     o.onFallback?.(fallbackNotice(o.model, GEMINI_FALLBACK));
@@ -824,12 +936,15 @@ function remember(model: string, key: string, err: unknown): void {
 async function geminiLoop(o: ToolLoopOpts, model: string): Promise<ToolLoopResult> {
   const client = new GoogleGenAI({ apiKey: o.key });
   let answer = '';
+  let finished = false;
 
   for (let turn = 0; turn < o.maxTurns; turn++) {
+    throwIfStopped(o.signal);
     const stream = await client.models.generateContentStream({
       model,
       contents: toGeminiContents(o.messages),
       config: {
+        abortSignal: o.signal,
         systemInstruction: o.system,
         tools: [
           {
@@ -874,8 +989,12 @@ async function geminiLoop(o: ToolLoopOpts, model: string): Promise<ToolLoopResul
       const finish = chunk.candidates?.[0]?.finishReason;
       if (finish && finish !== 'STOP' && finish !== 'MAX_TOKENS') refused = true;
     }
+    throwIfStopped(o.signal);
     if (refused) return { answer, refused: true };
-    if (uses.length === 0) break;
+    if (uses.length === 0) {
+      finished = true;
+      break;
+    }
 
     o.messages.push({
       role: 'assistant',
@@ -893,7 +1012,49 @@ async function geminiLoop(o: ToolLoopOpts, model: string): Promise<ToolLoopResul
     o.messages.push({ role: 'user', content: await runAll(o, uses) });
     answer = '';
   }
-  return { answer, refused: false };
+  return finishLoop(o.onText, answer, finished);
+}
+
+/**
+ * Ollama turning a model away for having no tools: a 400 whose message says it
+ * "does not support tools". Both halves are checked. A 400 is also what a
+ * history Ollama cannot parse earns, which is no fault of the model the reader
+ * picked, and the words alone could turn up in an error from something else
+ * along the way.
+ */
+function lacksTools(err: unknown): boolean {
+  const e = err as { status?: number; message?: string };
+  return e?.status === 400 && /support.{0,20}tool|tool.{0,30}support/i.test(e.message ?? '');
+}
+
+/**
+ * The staff chat and the trade desk, on a model served from this machine.
+ *
+ * Ollama answers on OpenAI's shape, so this is OpenAI's loop pointed at the
+ * address in Settings, which already ends in /v1. The provider had no loop
+ * before: the chat gave up with "No implementation", and the trade desk fell
+ * through to the Anthropic one holding the placeholder key.
+ *
+ * Two things are said here because only a local server needs them. The key is
+ * the placeholder and never the one passed in, as with every other call to it.
+ * And not every model can be given tools: Ollama refuses the first request
+ * with a 400 when one cannot, which on its own would reach the page as
+ * `400 registry.ollama.ai/library/gemma2:9b does not support tools`. What to do
+ * about it is a choice in Settings, so that is what the reader is told, and the
+ * model is named as they chose it.
+ */
+async function ollamaToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
+  if (!o.model.trim()) throw new Error(NO_LOCAL_MODEL);
+  try {
+    return await openAiToolLoop({ ...o, key: LOCAL_KEY }, ollamaUrl());
+  } catch (err) {
+    if (!lacksTools(err)) throw err;
+    throw new Error(
+      `The model "${o.model}" does not support tools, and the staff chat and the trade desk ` +
+        `need them to look things up. Pick a model that supports tools in Settings, for ` +
+        `example llama3.1 or qwen2.5.`
+    );
+  }
 }
 
 /**
@@ -901,9 +1062,12 @@ async function geminiLoop(o: ToolLoopOpts, model: string): Promise<ToolLoopResul
  * implementation in chat.ts, where the caching and thinking parameters live.
  */
 export function toolLoopFor(provider: ProviderId): ((o: ToolLoopOpts) => Promise<ToolLoopResult>) | null {
-  if (provider === 'openai') return (o) => openAiToolLoop(o);
-  if (provider === 'opencode') return (o) => openAiToolLoop(o, OPENCODE_BASE_URL);
-  if (provider === 'gemini') return geminiToolLoop;
+  if (provider === 'openai') return (o) => whenStopped(o.signal, () => openAiToolLoop(o));
+  if (provider === 'opencode') {
+    return (o) => whenStopped(o.signal, () => openAiToolLoop(o, OPENCODE_BASE_URL));
+  }
+  if (provider === 'gemini') return (o) => whenStopped(o.signal, () => geminiToolLoop(o));
+  if (provider === 'ollama') return (o) => whenStopped(o.signal, () => ollamaToolLoop(o));
   return null;
 }
 
@@ -963,7 +1127,12 @@ export function describeError(provider: ProviderId, err: unknown): string {
   if (status && status >= 500) {
     return `${where?.label ?? 'The service'} had a problem at their end. Nothing is wrong with your save — try again shortly.`;
   }
-  if (/fetch failed|ENOTFOUND|ECONNREFUSED|network|timeout/i.test(message)) {
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|network|timeout|connection error/i.test(message)) {
+    // Ollama is on this machine, so "check your connection" sends the reader
+    // the wrong way: the usual cause is that it is not running
+    if (provider === 'ollama') {
+      return 'Could not reach Ollama. Check that it is running and that the address in Settings is right.';
+    }
     return 'Could not reach the service. Check your connection and try again.';
   }
   return message || 'The request failed.';
@@ -1005,15 +1174,20 @@ function statusIn(raw: string): number | undefined {
 async function anthropicToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
   const client = new Anthropic({ apiKey: o.key });
   let answer = '';
+  let finished = false;
 
   for (let turn = 0; turn < o.maxTurns; turn++) {
-    const message = await client.messages.create({
-      model: o.model,
-      max_tokens: 4000,
-      system: o.system,
-      tools: o.tools,
-      messages: o.messages,
-    });
+    throwIfStopped(o.signal);
+    const message = await client.messages.create(
+      {
+        model: o.model,
+        max_tokens: 4000,
+        system: o.system,
+        tools: o.tools,
+        messages: o.messages,
+      },
+      { signal: o.signal }
+    );
     if (message.stop_reason === 'refusal') return { answer, refused: true };
 
     for (const block of message.content) {
@@ -1026,7 +1200,10 @@ async function anthropicToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
     const uses = message.content.filter(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
     );
-    if (uses.length === 0) break;
+    if (uses.length === 0) {
+      finished = true;
+      break;
+    }
 
     o.messages.push({ role: 'assistant', content: message.content });
     o.messages.push({
@@ -1039,7 +1216,7 @@ async function anthropicToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
     // Each turn's text has already been handed over; keeping it would repeat it
     answer = '';
   }
-  return { answer, refused: false };
+  return finishLoop(o.onText, answer, finished);
 }
 
 /**
@@ -1049,5 +1226,5 @@ async function anthropicToolLoop(o: ToolLoopOpts): Promise<ToolLoopResult> {
  * purpose: the chat has its own there and must keep it.
  */
 export function toolLoop(provider: ProviderId): (o: ToolLoopOpts) => Promise<ToolLoopResult> {
-  return toolLoopFor(provider) ?? anthropicToolLoop;
+  return toolLoopFor(provider) ?? ((o) => whenStopped(o.signal, () => anthropicToolLoop(o)));
 }

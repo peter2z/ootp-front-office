@@ -66,7 +66,7 @@ beforeAll(() => {
 
 interface Staff {
   today: number | null;
-  bullpen: Array<{ player_id: number; name: string; status: string }>;
+  bullpen: Array<{ player_id: number; name: string; status: string; tone: 'ok' | 'warn' | 'bad' }>;
 }
 
 const staff = (): Promise<Staff> => request(`/api/pitching/${IDS.mlbTeam}`);
@@ -87,12 +87,16 @@ describe('the day the page thinks it is', () => {
 describe('a man who threw in the last game played', () => {
   it('is described as having thrown yesterday, not today', async () => {
     /*
-     * The heart of the report. He is not pitching back-to-back if he goes
-     * tonight — he had a day off in between, and the page said otherwise.
+     * The heart of the report: he threw yesterday, and the page called it
+     * today. Going again tonight would be back-to-back, which is amber from
+     * fifteen pitches up, and he threw exactly fifteen. The wording was all
+     * this checked, and the colour is what stopped meaning anything when
+     * "today" moved (see bullpenConsecutive.test.ts).
      */
     const him = await find(THREW_YESTERDAY);
     expect(him.status).toMatch(/yesterday/);
     expect(him.status, 'the last game played was called today').not.toMatch(/today/);
+    expect(him.tone, `read as "${him.status}"`).toBe('warn');
   });
 
   it('still reports the pitches he actually threw', async () => {

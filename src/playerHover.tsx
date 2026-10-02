@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { getPlayer, type PlayerDossier } from './api';
 import { formatRating } from './ratingScale';
+import { formatMoney } from './stats';
 import { daysShort } from './injury';
 
 /**
@@ -139,7 +140,7 @@ function Card({ id, anchor }: { id: number; anchor: DOMRect }) {
             )}
             {data.contract && (
               <span>
-                <b>${(data.contract.salaryNow / 1_000_000).toFixed(1)}M</b> thru {data.contract.endYear}
+                <b>{formatMoney(data.contract.salaryNow)}</b> thru {data.contract.endYear}
               </span>
             )}
           </div>

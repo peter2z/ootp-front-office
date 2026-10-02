@@ -1,0 +1,10 @@
+{
+ "signals": {
+  "watch": 811,
+  "blocked": 190,
+  "null": 981,
+  "demote": 52,
+  "promote": 20
+ },
+ "promoteEmptyReasons": []
+}

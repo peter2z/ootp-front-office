@@ -1,0 +1,1 @@
+{"models":[{"id":"claude-opus-5","name":"Claude Opus 5","contextTokens":1000000,"adaptiveThinking":true},{"id":"claude-sonnet-5","name":"Claude Sonnet 5","contextTokens":1000000,"adaptiveThinking":true},{"id":"claude-haiku-4-5","name":"Claude Haiku 4.5","contextTokens":200000,"adaptiveThinking":null}],"live":false,"provider":"anthropic"}

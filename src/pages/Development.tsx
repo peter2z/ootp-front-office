@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet } from '../api';
+import { apiGet, getStatus, type Status } from '../api';
 import { PlayerLink } from '../playerModal';
 import { Th, SortableTh } from '../Th';
 
@@ -43,17 +43,22 @@ export function Development({ orgId }: { orgId: number }) {
   const [data, setData] = useState<DevData | null>(null);
   const [from, setFrom] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
 
   useEffect(() => {
     setData(null);
     const q = from ? `?from=${encodeURIComponent(from)}` : '';
     apiGet<DevData>(`/api/development/${orgId}${q}`).then(setData).catch((e) => setError(e.message));
+    getStatus().then(setStatus).catch(() => {
+      /* suppress error when fetching status */
+    });
   }, [orgId, from]);
 
   if (error) return <div className="banner error">{error}</div>;
   if (!data) return <p className="muted">Loading development report…</p>;
 
   if (data.changes === null) {
+    const saveName = status?.saveName ?? 'this save';
     return (
       <div className="hint">
         <h3>Development tracking is armed</h3>
@@ -61,6 +66,9 @@ export function Development({ orgId }: { orgId: number }) {
           A ratings snapshot of every player was captured as of your current export
           ({data.dates[0] ? readable(data.dates[0]) : 'no date'}). After your next sim + CSV export, this page will show every scout-rating
           change in your organization — who's developing, who's declining, whose ceiling moved.
+        </p>
+        <p>
+          Development tracking belongs to {saveName}. Switching saves starts a fresh history, and {saveName}'s history returns when it is loaded again.
         </p>
       </div>
     );
@@ -92,7 +100,12 @@ export function Development({ orgId }: { orgId: number }) {
       </div>
 
       {data.changes.length === 0 && (
-        <p className="muted">No scout-rating changes between these snapshots.</p>
+        <div className="hint">
+          <p className="muted">No scout-rating changes between these snapshots.</p>
+          <p className="muted">
+            Development tracking belongs to {status?.saveName ?? 'this save'}. Switching saves starts a fresh history, and {status?.saveName ?? 'this save'}'s history returns when it is loaded again.
+          </p>
+        </div>
       )}
 
       {risers.length > 0 && (

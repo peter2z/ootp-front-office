@@ -3,6 +3,7 @@ import { displayMagicNumber, gamesLeftByTeam, raceMarks, type RaceMark } from '.
 import { db, tableExists } from './db.js';
 import { LEVEL_NAMES } from './valuation.js';
 import { computeBatting, computePitching, leagueBaseline } from './stats.js';
+import { amateurRule } from './freeagents.js';
 
 export const leagueRoutes = Router();
 
@@ -143,10 +144,6 @@ leagueRoutes.get('/standings/:orgId', (req, res) => {
 });
 
 /**
- * League-wide player browser. Filters run in SQL so only the returned page has
- * its stats computed — the players table holds 130k rows.
- */
-/**
  * Every name the AI features are likely to mention, so plain prose can be
  * turned into hoverable links.
  *
@@ -173,6 +170,55 @@ leagueRoutes.get('/name-index/:orgId', (req, res) => {
   res.json({ names: rows.map((r) => [r.id, r.name, r.ours] as const) });
 });
 
+/**
+ * A cheap answer to "has anything in this database changed since I last looked?"
+ *
+ * Three counters, each of which moves for a different reason: the schema
+ * version when a table is dropped and rebuilt, which is what an import does to
+ * every table; the data version when another connection commits, such as a
+ * second copy of the app open on the same save; and the change count when this
+ * connection writes. Nothing can alter the league without one of them moving,
+ * and reading all three costs microseconds.
+ */
+function dbEpoch(): string {
+  return [
+    db.pragma('schema_version', { simple: true }),
+    db.pragma('data_version', { simple: true }),
+    (db.prepare(`SELECT total_changes() AS n`).get() as { n: number }).n,
+  ].join(':');
+}
+
+let statYearMemo: { epoch: string; year: number | null } | null = null;
+
+/**
+ * The season the stat lines belong to: the latest year anyone has batted in.
+ *
+ * Asking is a read of every one of seven hundred thousand career rows, since
+ * nothing is indexed on year, and it took about a sixth of a second on every
+ * request to learn a number that only changes when the league does. So it is
+ * remembered for as long as the database is untouched and looked up again the
+ * moment it is not.
+ */
+function latestStatYear(): number | null {
+  if (!tableExists('players_career_batting_stats')) return null;
+  const epoch = dbEpoch();
+  if (statYearMemo?.epoch === epoch) return statYearMemo.year;
+  const found = (
+    db.prepare(`SELECT MAX(year) AS y FROM players_career_batting_stats`).get() as { y: number | null }
+  ).y;
+  const year = typeof found === 'number' && Number.isInteger(found) ? found : null;
+  statYearMemo = { epoch, year };
+  return year;
+}
+
+/**
+ * League-wide player browser. Filters run in SQL so only the returned page has
+ * its stats computed — the players table holds 130k rows.
+ *
+ * `limit` rows from `offset`, in the order asked for, and `total` for how many
+ * there are behind them, so a page can say "100 of 678" and ask for the next
+ * hundred without ever being handed the rest.
+ */
 leagueRoutes.get('/players', (req, res) => {
   if (!tableExists('players')) return res.status(400).json({ error: 'No data imported yet' });
 
@@ -193,8 +239,20 @@ leagueRoutes.get('/players', (req, res) => {
       | undefined)?.team_id ?? null);
   const group = req.query.group === 'pitching' ? 'pitching' : 'batting';
   const freeAgents = req.query.freeAgents === '1';
-  const limit = Math.min(Number(req.query.limit ?? 100), 300);
-  const offset = Math.max(Number(req.query.offset ?? 0), 0);
+  /*
+   * A page of the list, never the whole of it.
+   *
+   * Both numbers come from whoever is asking, so both are held to something
+   * sensible here: SQLite reads a negative LIMIT as "no limit", which would
+   * hand a hundred and thirty thousand players to anything that asked for -1,
+   * and a size nobody capped is the same request spelled differently.
+   */
+  const whole = (v: unknown, fallback: number): number => {
+    const n = Math.floor(Number(v));
+    return v !== undefined && v !== '' && Number.isFinite(n) ? n : fallback;
+  };
+  const limit = Math.min(Math.max(whole(req.query.limit, 100), 0), 300);
+  const offset = Math.max(whole(req.query.offset, 0), 0);
 
   /*
    * The narrowing that makes a list of four hundred and sixty men usable.
@@ -218,6 +276,18 @@ leagueRoutes.get('/players', (req, res) => {
   const params: Array<string | number> = [];
   if (freeAgents) {
     where.push('p.free_agent = 1');
+    /*
+     * OOTP marks the whole draft class as without a club until it is drafted,
+     * so "free agents" would otherwise be mostly amateurs who cannot be signed.
+     * The Free Agents page leaves them out with this same rule; so does this
+     * scope, read through the viewer's league, which is where its draft is.
+     */
+    const league = viewerOrg !== null
+      ? (db.prepare(`SELECT league_id FROM teams WHERE team_id = ?`).get(viewerOrg) as
+          | { league_id: number }
+          | undefined)
+      : undefined;
+    if (league) where.push(`NOT (${amateurRule(league.league_id)})`);
   } else {
     where.push('p.team_id > 0');
     if (level !== null && Number.isFinite(level)) {
@@ -244,21 +314,28 @@ leagueRoutes.get('/players', (req, res) => {
   if (minAge !== null) { where.push('p.age >= ?'); params.push(minAge); }
   if (maxAge !== null) { where.push('p.age <= ?'); params.push(maxAge); }
 
-  const statYear = tableExists('players_career_batting_stats')
-    ? (db.prepare(`SELECT MAX(year) AS y FROM players_career_batting_stats`).get() as { y: number }).y
-    : null;
+  const statYear = latestStatYear();
 
   // Sort by this season's playing time so the default view is the regulars,
   // not everyone whose last name starts with A. Players with no stat line
   // (rookies, the just-signed) fall to the bottom but stay findable by name.
   const ptTable = group === 'pitching' ? 'players_career_pitching_stats' : 'players_career_batting_stats';
   const ptColumn = group === 'pitching' ? 'outs' : 'pa';
-  const ptJoin =
-    statYear !== null
-      ? `LEFT JOIN (SELECT player_id, SUM(${ptColumn}) AS pt FROM "${ptTable}"
-                    WHERE year = ${statYear} AND split_id = 1 GROUP BY player_id) pt
-         ON pt.player_id = p.player_id`
-      : '';
+  /*
+   * His playing time, worked out for the rows that need it and for no others.
+   *
+   * This was a LEFT JOIN against every player's season summed up — seven
+   * hundred thousand career rows read to build it — and the count carried it
+   * as well as the page, so a first look at the majors read that table twice
+   * to show a hundred men, about four tenths of a second of a half-second
+   * answer. A lookup per player goes to the index on player_id and reads the
+   * handful of rows he has. It means exactly what the join did: his season's
+   * total, and nothing at all for a man with no line.
+   */
+  const ptExpr = statYear !== null
+    ? `(SELECT SUM(s.${ptColumn}) FROM "${ptTable}" s
+        WHERE s.player_id = p.player_id AND s.year = ${statYear} AND s.split_id = 1)`
+    : 'NULL';
   /*
    * Sorting, which has to happen before the page is cut rather than after.
    *
@@ -274,37 +351,52 @@ leagueRoutes.get('/players', (req, res) => {
    * there would be two engines to keep agreeing. Those sorts instead widen the
    * query to every match, compute, order, and cut the page afterwards.
    */
-  const PLAIN_SORTS: Record<string, string> = {
-    name: 'p.last_name, p.first_name',
-    age: 'p.age',
-    pos: 'p.position, p.last_name',
-    team: 't.abbr, p.last_name',
-    level: 't.level, p.last_name',
-    pt: 'COALESCE(pt.pt, 0)',
+  // The first column takes the direction asked for; any that follow only break ties
+  const PLAIN_SORTS: Record<string, string[]> = {
+    name: ['p.last_name', 'p.first_name'],
+    age: ['p.age'],
+    pos: ['p.position', 'p.last_name'],
+    team: ['t.abbr', 'p.last_name'],
+    level: ['t.level', 'p.last_name'],
+    pt: ['COALESCE(pt_total, 0)'],
   };
   const sortKey = typeof req.query.sort === 'string' ? req.query.sort : null;
   const descending = req.query.dir !== 'asc';
-  const plainSort = sortKey !== null ? PLAIN_SORTS[sortKey] : undefined;
+  // The key comes from the URL, and "constructor" is not a column of ours
+  const plainSort =
+    sortKey !== null && Object.hasOwn(PLAIN_SORTS, sortKey) && (sortKey !== 'pt' || statYear !== null)
+      ? PLAIN_SORTS[sortKey]
+      : undefined;
   /** A stat sort: not a plain column, so it needs every match computed first. */
   const statSort = sortKey !== null && plainSort === undefined ? sortKey : null;
 
   const defaultOrder = statYear !== null
-    ? 'COALESCE(pt.pt, 0) DESC, p.last_name, p.first_name'
+    ? 'COALESCE(pt_total, 0) DESC, p.last_name, p.first_name'
     : 'p.last_name, p.first_name';
-  const orderBy = plainSort
-    ? `${plainSort.split(', ').map((c, i) => (i === 0 ? `${c} ${descending ? 'DESC' : 'ASC'}` : c)).join(', ')}`
-    : defaultOrder;
+  const orderBy =
+    (plainSort
+      ? plainSort.map((c, i) => (i === 0 ? `${c} ${descending ? 'DESC' : 'ASC'}` : c)).join(', ')
+      : defaultOrder) +
+    /*
+     * Last, so the order is total. Paging cuts this list at a different place
+     * on every request, and two men who tie on the sort — the same age, the
+     * same name — are otherwise free to swap between one page and the next,
+     * which shows one of them twice and the other not at all.
+     */
+    ', p.player_id';
+  /** Only a sort that reads his playing time needs it fetched; a name or an age never does. */
+  const readsPlayingTime = statYear !== null && (plainSort === undefined || sortKey === 'pt');
 
   /*
    * A playing-time floor is the one filter that cannot come from the players
-   * table, so it rides on the join that already exists for the sort order —
-   * and the count has to carry the same join, or the total describes a
-   * different set of players than the rows beneath it.
+   * table, so it is worked out per player like the sort order is — and the
+   * count has to carry the same floor, or the total describes a different set
+   * of players than the rows beneath it.
    */
   const ptWhere = [...where];
   const ptParams = [...params];
   if (minPt !== null && statYear !== null) {
-    ptWhere.push('COALESCE(pt.pt, 0) >= ?');
+    ptWhere.push(`COALESCE(${ptExpr}, 0) >= ?`);
     ptParams.push(minPt);
   }
 
@@ -312,7 +404,6 @@ leagueRoutes.get('/players', (req, res) => {
     db
       .prepare(
         `SELECT COUNT(*) AS n FROM players p LEFT JOIN teams t ON t.team_id = p.team_id
-         ${ptJoin}
          WHERE ${ptWhere.join(' AND ')}`
       )
       .get(...ptParams) as { n: number }
@@ -338,9 +429,9 @@ leagueRoutes.get('/players', (req, res) => {
               CASE WHEN t.team_id IS NULL THEN NULL ELSE ${teamLabel} END AS team, t.abbr,
               p.organization_id,
               CASE WHEN o.team_id IS NULL THEN NULL ELSE ${teamLabel.replace(/t\./g, 'o.')} END AS organization
+              ${readsPlayingTime ? `, ${ptExpr} AS pt_total` : ''}
        FROM players p LEFT JOIN teams t ON t.team_id = p.team_id
        LEFT JOIN teams o ON o.team_id = p.organization_id
-       ${ptJoin}
        WHERE ${ptWhere.join(' AND ')}
        ORDER BY ${orderBy}
        ${statSort === null ? 'LIMIT ? OFFSET ?' : ''}`
@@ -369,74 +460,39 @@ leagueRoutes.get('/players', (req, res) => {
          GROUP BY player_id, league_id, level_id`
       )
       .all(statYear, ...ids) as Array<Record<string, number>>;
+    /*
+     * A player can appear at several levels; keep the busiest stint — and
+     * say which one it was. The line was already correctly unblended, but
+     * nothing marked it, so a Triple-A season on a man now on the major
+     * league roster read as major-league work. A reader reported exactly
+     * that: two lines set against each other, one of them not what it
+     * appeared to be.
+     *
+     * The busiest is picked on the raw line, before anything is worked out
+     * from it. A league baseline costs a pass over that league's whole
+     * history, and every stint used to pay for one — so a rehab game in
+     * Double-A cost a first view of the majors the Double-A baseline, to
+     * compute a line that was then thrown away. Ties go to the first, as they
+     * always did.
+     */
+    const measure = group === 'pitching' ? 'outs' : 'pa';
+    const busiest = new Map<number, Record<string, number>>();
     for (const row of statRows) {
+      const prior = busiest.get(row.player_id);
+      if (!prior || (row[measure] ?? 0) > (prior[measure] ?? 0)) busiest.set(row.player_id, row);
+    }
+    // Looked up once per man rather than searched for on each of his stints
+    const clubOf = new Map(rows.map((r) => [r.player_id as number, (r.team_id as number) ?? null]));
+    for (const row of busiest.values()) {
       const base = leagueBaseline(row.league_id, statYear, row.level_id);
-      const teamId = (rows.find((r) => r.player_id === row.player_id)?.team_id as number) ?? null;
+      const teamId = clubOf.get(row.player_id) ?? null;
       const computed = group === 'pitching'
         ? computePitching(row, base, teamId)
         : computeBatting(row, base, teamId);
-      /*
-       * A player can appear at several levels; keep the busiest stint — and
-       * say which one it was. The line was already correctly unblended, but
-       * nothing marked it, so a Triple-A season on a man now on the major
-       * league roster read as major-league work. A reader reported exactly
-       * that: two lines set against each other, one of them not what it
-       * appeared to be.
-       */
-      const existing = statsById.get(row.player_id);
-      const weight = group === 'pitching' ? (computed.ip ?? 0) : (computed.pa ?? 0);
-      const prior = existing ? Number((group === 'pitching' ? existing.ip : existing.pa) ?? 0) : -1;
-      if (weight > prior) {
-        statsById.set(row.player_id, {
-          ...computed,
-          statsLevel: LEVEL_NAMES[row.level_id] ?? `L${row.level_id}`,
-        });
-      }
-    }
-  }
-
-  /*
-   * Who changed clubs mid-season, and what he did at each stop.
-   *
-   * The season line already covers every club a man played for, which is the
-   * right total — but it hides the more interesting fact. A bat acquired in
-   * July has a record before the trade and a record since, and "how is he
-   * hitting" usually means the second one. Nothing was reading a partial
-   * season; the split simply was not on offer, so nobody could mention it.
-   */
-  const stintsById = new Map<number, Array<Record<string, number | string>>>();
-  if (ids.length > 0 && statYear !== null) {
-    const table = group === 'pitching' ? 'players_career_pitching_stats' : 'players_career_batting_stats';
-    const measure = group === 'pitching' ? 'SUM(outs) AS outs' : 'SUM(pa) AS pa, SUM(h) AS h, SUM(hr) AS hr';
-    const holes = ids.map(() => '?').join(',');
-    const rowsBy = db
-      .prepare(
-        `SELECT s.player_id, s.team_id, t.abbr, s.level_id, ${measure}
-         FROM "${table}" s LEFT JOIN teams t ON t.team_id = s.team_id
-         WHERE s.year = ? AND s.split_id = 1 AND s.player_id IN (${holes})
-         GROUP BY s.player_id, s.team_id, s.level_id
-         HAVING ${group === 'pitching' ? 'SUM(outs)' : 'SUM(pa)'} > 0`
-      )
-      .all(statYear, ...ids) as Array<Record<string, number | string>>;
-    const grouped = new Map<number, Array<Record<string, number | string>>>();
-    for (const r of rowsBy) {
-      const list = grouped.get(r.player_id as number) ?? [];
-      list.push(r);
-      grouped.set(r.player_id as number, list);
-    }
-    for (const [playerId, list] of grouped) {
-      // Only worth reporting when he actually moved
-      if (list.length < 2) continue;
-      stintsById.set(
-        playerId,
-        list.map((r) => ({
-          team: (r.abbr as string) ?? '?',
-          level: LEVEL_NAMES[r.level_id as number] ?? `L${r.level_id}`,
-          ...(group === 'pitching'
-            ? { ip: Math.round(((r.outs as number) / 3) * 10) / 10 }
-            : { pa: r.pa as number, h: r.h as number, hr: r.hr as number }),
-        }))
-      );
+      statsById.set(row.player_id, {
+        ...computed,
+        statsLevel: LEVEL_NAMES[row.level_id] ?? `L${row.level_id}`,
+      });
     }
   }
 
@@ -462,6 +518,56 @@ leagueRoutes.get('/players', (req, res) => {
       return descending ? y - x : x - y;
     });
     page = page.slice(offset, offset + limit);
+  }
+
+  /*
+   * Who changed clubs mid-season, and what he did at each stop.
+   *
+   * The season line already covers every club a man played for, which is the
+   * right total — but it hides the more interesting fact. A bat acquired in
+   * July has a record before the trade and a record since, and "how is he
+   * hitting" usually means the second one. Nothing was reading a partial
+   * season; the split simply was not on offer, so nobody could mention it.
+   *
+   * Asked of the men on the page and not of every match: a stat sort widens
+   * the query to the whole league to order it, and a few thousand men's
+   * stops were being fetched to be shown for a hundred.
+   */
+  const stintsById = new Map<number, Array<Record<string, number | string>>>();
+  const pageIds = page.map((r) => r.player_id as number);
+  if (pageIds.length > 0 && statYear !== null) {
+    const table = group === 'pitching' ? 'players_career_pitching_stats' : 'players_career_batting_stats';
+    const measure = group === 'pitching' ? 'SUM(outs) AS outs' : 'SUM(pa) AS pa, SUM(h) AS h, SUM(hr) AS hr';
+    const holes = pageIds.map(() => '?').join(',');
+    const rowsBy = db
+      .prepare(
+        `SELECT s.player_id, s.team_id, t.abbr, s.level_id, ${measure}
+         FROM "${table}" s LEFT JOIN teams t ON t.team_id = s.team_id
+         WHERE s.year = ? AND s.split_id = 1 AND s.player_id IN (${holes})
+         GROUP BY s.player_id, s.team_id, s.level_id
+         HAVING ${group === 'pitching' ? 'SUM(outs)' : 'SUM(pa)'} > 0`
+      )
+      .all(statYear, ...pageIds) as Array<Record<string, number | string>>;
+    const grouped = new Map<number, Array<Record<string, number | string>>>();
+    for (const r of rowsBy) {
+      const list = grouped.get(r.player_id as number) ?? [];
+      list.push(r);
+      grouped.set(r.player_id as number, list);
+    }
+    for (const [playerId, list] of grouped) {
+      // Only worth reporting when he actually moved
+      if (list.length < 2) continue;
+      stintsById.set(
+        playerId,
+        list.map((r) => ({
+          team: (r.abbr as string) ?? '?',
+          level: LEVEL_NAMES[r.level_id as number] ?? `L${r.level_id}`,
+          ...(group === 'pitching'
+            ? { ip: Math.round(((r.outs as number) / 3) * 10) / 10 }
+            : { pa: r.pa as number, h: r.h as number, hr: r.hr as number }),
+        }))
+      );
+    }
   }
 
   res.json({

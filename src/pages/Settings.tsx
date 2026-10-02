@@ -273,8 +273,9 @@ export function Settings({
       <section className="settings-block">
         <h2>AI Features</h2>
         <p className="muted hint-line">
-          Storylines, the GM Briefing, and AI trade verdicts call an AI service with your own key.
-          Everything else in the app works without one. Generations cost a few cents each.
+          The Paper, the Daily Recap, the GM Briefing, AI trade verdicts, and Ask call an AI service
+          with your own key. Everything else in the app works without one. Generations cost a few
+          cents each.
         </p>
 
         <div className="settings-row">
@@ -290,11 +291,16 @@ export function Settings({
           <select
             value={settings.provider}
             onChange={(e) => void switchProvider(e.target.value as ProviderId)}
+            aria-label="AI service"
           >
             {(providers?.providers ?? []).map((p) => (
               <option key={p.id} value={p.id}>
                 {p.label}
-                {providers?.keys[p.id]?.configured ? ' ✓' : ''}
+                {/* A tick means a key is saved. A local server has none to save, and
+                    a tick there only read as "installed", which nothing here checks. */}
+                {p.id === 'ollama'
+                  ? ' — no key needed'
+                  : providers?.keys[p.id]?.configured ? ' ✓' : ''}
               </option>
             ))}
           </select>
@@ -388,8 +394,8 @@ export function Settings({
           <div>
             <strong>Model</strong>
             <div className="muted">
-              Used by Peter, Storylines, the GM Briefing, and trade verdicts. Larger models reason
-              better and cost more per generation; smaller ones are quicker and cheaper.
+              Used by every AI feature. Larger models reason better and cost more per generation;
+              smaller ones are quicker and cheaper.
             </div>
             {models && !models.live && (
               <div className="muted">
@@ -405,6 +411,7 @@ export function Settings({
           </div>
           <select
             value={activeModel}
+            aria-label="Model"
             onChange={(e) => void update({
               model: e.target.value,
               models: { ...settings.models, [settings.provider]: e.target.value },
@@ -617,6 +624,7 @@ export function Settings({
           <select
             value={settings.defaultOrgId ?? ''}
             onChange={(e) => void update({ defaultOrgId: e.target.value ? Number(e.target.value) : null })}
+            aria-label="Organization to open with"
           >
             <option value="">Your club (automatic)</option>
             {orgs.map((o) => (

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiGet } from '../api';
 import { PlayerLink } from '../playerModal';
-import { daysCell } from '../injury';
+import { daysCell, reportsIlDays } from '../injury';
 import { Th } from '../Th';
 
 interface Injury {
@@ -23,14 +23,22 @@ export function Injuries({ orgId }: { orgId: number }) {
   if (!data) return <p className="muted">Loading the trainer's report…</p>;
   if (data.length === 0) return <p className="muted">Everyone is healthy across the organization. Enjoy it while it lasts.</p>;
 
+  // OOTP leaves this column at zero for everybody in some exports, which reads
+  // as a list of men who never went on the injured list rather than as no data
+  const showIlDays = reportsIlDays(data);
+
   return (
     <div>
       <p className="muted hint-line">
         Every injured player in the organization, majors to rookie ball. Click a name for their injury history.
+        {!showIlDays && ' This export gives no injured-list days for the season, so that column is left out.'}
       </p>
       <table>
         <thead>
-          <tr><Th>Player</Th><Th>Age</Th><Th>Pos</Th><Th>Team</Th><Th>Status</Th><Th>Est. return</Th><Th>IL days this yr</Th></tr>
+          <tr>
+            <Th>Player</Th><Th>Age</Th><Th>Pos</Th><Th>Team</Th><Th>Status</Th><Th>Est. return</Th>
+            {showIlDays && <Th>IL days this yr</Th>}
+          </tr>
         </thead>
         <tbody>
           {data.map((p) => (
@@ -43,7 +51,7 @@ export function Injuries({ orgId }: { orgId: number }) {
                 <span className={`flag ${p.status !== 'Day-to-day' ? 'flag-hot' : ''}`}>{p.status}</span>
               </td>
               <td className="num">{daysCell(p)}</td>
-              <td className="num">{p.dlDaysThisYear ?? '—'}</td>
+              {showIlDays && <td className="num">{p.dlDaysThisYear ?? '—'}</td>}
             </tr>
           ))}
         </tbody>

@@ -14,7 +14,8 @@ import { tradeContext } from './trade.js';
 import { tradingBlock } from './tradingblock.js';
 import { tradeVoice, type Persona } from './staff.js';
 import {
-  VALUE_PERCENTILE_NOTE, calendarBriefing, currentGameDate, rulesBriefing, seasonYear, teamFinances,
+  VALUE_PERCENTILE_NOTE, calendarBriefing, currentGameDate, ratingScaleMax, rulesBriefing,
+  scaleGrade, seasonYear, teamFinances,
 } from './valuation.js';
 
 export const aiRoutes = Router();
@@ -185,12 +186,41 @@ aiRoutes.post('/briefing/:orgId', (req, res) => {
 // ── AI trade evaluation ─────────────────────────────────────────────────
 
 /**
+ * The scale this save's ratings are on, in the words the desk reads a grade by.
+ *
+ * The glove paragraph said "on the 20-80 scale" whichever scale the save was
+ * set to, so on a 1-to-5 save a fielder rated 3 — an average one — read as the
+ * worst glove in baseball, and the desk said so with confidence. The scale is
+ * the user's own OOTP setting: the top of it is read off the data
+ * (ratingScaleMax) and where it starts follows from the scales OOTP offers.
+ */
+function ratingScaleBrief(): string {
+  const max = ratingScaleMax();
+  // 20-80 and 2-8 are the two scales that do not begin at one
+  const low = max === 80 ? 20 : max === 8 ? 2 : 1;
+  const average = Math.floor((low + max) / 2);
+  const elite = Math.ceil(low + ((max - low) * 5) / 6);
+  return (
+    `the ${low}-${max} scale this save uses (about ${average} is average and ` +
+    `${elite === max ? max : `${elite} or more`} is elite)`
+  );
+}
+
+/**
+ * A 20-80 grade as this save writes it, for the examples the prompt quotes. The
+ * numbers in an example are only there to show the shape of the data, but a
+ * "60 at 2B" on a 1-to-5 save is a grade nobody can have. A ceiling is rounded
+ * down, so it stays under the grade it is the ceiling to.
+ */
+const onThisScale = (grade: number, round = Math.round): number => round(scaleGrade(grade));
+
+/**
  * The brief the trade desk answers under, in the voice of the club's own
  * general manager rather than an anonymous "AI". Shared by the first verdict
  * and every reply after it, so the follow-ups do not drift into a different
  * man with different standards halfway down the thread.
  */
-function tradeSystem(voice: Persona, orgLabel: string | undefined, leagueId?: number): string {
+export function tradeSystem(voice: Persona, orgLabel: string | undefined, leagueId?: number): string {
   const who =
     voice.name === 'the front office'
       ? `You are the front office of ${orgLabel ?? 'this club'}`
@@ -209,17 +239,21 @@ function tradeSystem(voice: Persona, orgLabel: string | undefined, leagueId?: nu
     `"weGive" leaves the organisation; "weReceive" joins it.\n\n` +
       `Judge the deal as a roster decision, not an exchange of ratings. In particular:\n` +
       `- Say what each man actually is — his position, his role if he pitches, and the level he is ` +
-      `playing at. A 48-overall reliever and a 48-overall shortstop are not the same asset.\n` +
-      `- Use the season line, and read it against the level it was produced at. OPS+ and ERA+ are ` +
-      `scaled so 100 is average for that league, so they compare across levels; the raw rates do ` +
-      `not. Say when a sample is too small to mean anything.\n` +
+      `playing at. A ${onThisScale(48)}-overall reliever and a ${onThisScale(48)}-overall ` +
+      `shortstop are not the same asset.\n` +
+      `- Use "seasonLines": one line for each level he played at this season, the highest first, ` +
+      `each labelled with its level and club. Each is read against that level's league and in the ` +
+      `park he played most of it in, so OPS+, wRC+ and ERA+ (100 is average) compare across levels ` +
+      `and parks; the raw rates do not. Never add one level's line to another's, and say when a ` +
+      `sample is too small to mean anything.\n` +
     `- ${VALUE_PERCENTILE_NOTE}\n` +
     `- "onTheBlock" names the men in this deal whose own club has listed them for trade. A club ` +
     `that has listed a player wants to move him and the price starts lower; a club that has not ` +
     `is being asked for a favour and will charge for it. Say which of these you are dealing with.\n` +
     `- Judge the glove as well as the bat. "fielding" gives his rating at each position he can ` +
-    `play, on the 20-80 scale, with his ceiling where he has one — "60 at 2B, 35 at SS ` +
-    `(ceiling 55)" means he is a good second baseman who is not a shortstop yet and may never ` +
+    `play, on ${ratingScaleBrief()}, with his ceiling where he has one — "${onThisScale(60)} at ` +
+    `2B, ${onThisScale(35)} at SS (ceiling ${onThisScale(55, Math.floor)})" means he is a good ` +
+    `second baseman who is not a shortstop yet and may never ` +
     `be. "fieldingStats" is what he has actually done out there, this season and last: games, ` +
     `errors, fielding percentage and zone rating. Say what a move down the defensive spectrum ` +
     `costs, and never claim a man can play a position his ratings do not support. Only the ` +
@@ -231,19 +265,29 @@ function tradeSystem(voice: Persona, orgLabel: string | undefined, leagueId?: nu
       `the man in the job, say so — an upgrade that does not upgrade anything is not one. If he is ` +
       `not major-league ready, say where he actually slots and when he might matter.\n` +
       `- Weigh it against what the club is short of. "clubNeeds" gives the weakest positions and ` +
-      `the spare ones: value bought where you are already deep is worth less than the number says.\n` +
+      `the spare ones, the rotation (SP) and the bullpen (RP) among them: value bought where you ` +
+      `are already deep is worth less than the number says.\n` +
       `- Then the ordinary things: age, contract years, salary, and what the money commits you to.\n` +
-    `- A season line covers every club a man played for that year. Where somebody changed hands ` +
-    `mid-season, say what he has done since the move as well as across the year — a hot six weeks ` +
-    `in a new park is a different fact from a full season, and the reader wants both.\n` +
+    `- A line covers every club he played for at that level, named in "club". Where he changed ` +
+    `hands mid-season, "byClub" splits it, each club's part read in its own park: say what he ` +
+    `has done since the move as well as across the year — a hot six weeks in a new park is a ` +
+    `different fact from a full season, and the reader wants both.\n` +
     `- A contract ending is not a player leaving. Each man carries a "control" field: "leaving" ` +
     `reaches free agency, "arbitration" means he is kept and paid more, "pre-arbitration" kept ` +
     `cheaply, "reserve clause" cannot leave. Never call somebody a rental or a walk-year player ` +
     `from years-remaining alone — arbitration years are years of control, and they are worth ` +
     `paying for.\n` +
-      `- "totals" holds the same value, talent and salary figures shown on the page beside your ` +
-    `answer. Quote those if you quote totals at all, so the two never disagree — but a verdict ` +
-    `that is only those totals restated is not worth writing.\n\n` +
+      `- "totals" holds the figures shown on the page beside your answer. The summed value and ` +
+    `talent reward bodies, so they are not the verdict. "surplusSent" and "surplusReceived" are ` +
+    `what each side is worth over replacement, the 25th percentile of major leaguers in each ` +
+    `man's own group (position players, starters, relievers), so a throw-in adds nothing. ` +
+    `"bestPctSent" and "bestPctReceived" are the best man on each side, as a percentile of his ` +
+    `group. "verdict" says which side gives up more surplus. "quantityForQuality" is true when ` +
+    `that side does it with several men and none of them is within 15 percentile points of the ` +
+    `best man coming the other way: more bodies for one better player, which the surplus figure ` +
+    `flatters, because roster places are not free. Quote these if you quote totals at all, so ` +
+    `the two never disagree — but a verdict that is only those totals restated is not worth ` +
+    `writing.\n\n` +
     `Never invent a number that is not in the data you are given.`
   );
 }

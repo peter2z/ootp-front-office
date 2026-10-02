@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Every page that prints a grade must print it the way the setting asks.
@@ -18,7 +19,7 @@ import { join } from 'node:path';
  * setting in mind at all.
  */
 
-const SRC = new URL('../src/', import.meta.url).pathname;
+const SRC = join(fileURLToPath(import.meta.url), '..', '..', 'src');
 
 /** Grades. Deltas are excluded: a change of +1 is movement, not a grade. */
 const GRADE = /\{[^}]*\b\w+\.(cur|pot|oaRating|potRating)\b(?!Delta|ential)/;

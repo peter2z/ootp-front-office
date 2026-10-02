@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apiDelete, apiGet } from '../api';
+import { apiDelete, apiGet, getStatus, type Status } from '../api';
 import { PlayerLink } from '../playerModal';
 import { Th } from '../Th';
 
@@ -16,9 +16,13 @@ const LEVEL_NAMES: Record<number, string> = { 1: 'MLB', 2: 'AAA', 3: 'AA', 4: 'A
 export function Watchlist() {
   const [entries, setEntries] = useState<WatchEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
 
   const load = () => {
     apiGet<WatchEntry[]>('/api/watchlist').then(setEntries).catch((e) => setError(e.message));
+    getStatus().then(setStatus).catch(() => {
+      /* suppress error when fetching status */
+    });
   };
   useEffect(load, []);
 
@@ -36,6 +40,9 @@ export function Watchlist() {
         <p>
           Open any player card and hit <strong>☆ Watch</strong> to track trade targets, free agents, or prospects —
           with your own notes. They'll all be collected here.
+        </p>
+        <p>
+          Your watchlist belongs to {status?.saveName ?? 'this save'}. Switching saves starts a fresh list, and {status?.saveName ?? 'this save'}'s watchlist returns when it is loaded again.
         </p>
       </div>
     );
@@ -57,7 +64,11 @@ export function Watchlist() {
                 {w.level !== null && <span className="level-tag">{LEVEL_NAMES[w.level] ?? 'R'}</span>} {w.team ?? '—'}
               </td>
               <td className="reasons">{w.note || <span className="muted">no notes yet — add them on the player card</span>}</td>
-              <td><button className="chip-x" onClick={() => remove(w.player_id)} title="Remove">✕</button></td>
+              <td>
+                <button className="chip-x" onClick={() => remove(w.player_id)} title="Remove" aria-label={`Remove ${w.name} from the watchlist`}>
+                  ✕
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>

@@ -102,14 +102,39 @@ franchiseRoutes.get('/franchise/:teamId', (req, res) => {
 });
 
 /**
+ * How many of a system's prospects its rank is taken from.
+ *
+ * The rank used to add up every man below the majors, and a farm system is not
+ * the sum of its roster. Affiliates carry between 177 and 310 players and most
+ * of them are the same grade of filler, so the total tracked headcount: on a
+ * real save the Spearman correlation between farm rank and players in the
+ * system was 0.973, the top ten farms held 288 to 310 players, and the Dodgers,
+ * with 248, ranked 24th. Fifty more replacement-level players would have lifted
+ * any system's rank, which is the opposite of what the rank is for.
+ *
+ * Ten, because that is what "how strong is this farm" is conventionally asked
+ * of: the prospects who will actually matter, with nothing beneath them able to
+ * move the answer. On the same save the correlation with headcount falls to
+ * about zero. They are ranked on OOTP's talent value, a ceiling that has no
+ * scale to assume, rather than by counting 50-grade players — which would tie
+ * most systems on a handful of whole numbers and means nothing on a save whose
+ * ratings are not 20-80.
+ */
+const TOP_PROSPECTS = 10;
+
+/** The best few values added up, however many there are to choose from. */
+const bestSum = (values: number[], n = TOP_PROSPECTS): number =>
+  [...values].sort((a, b) => b - a).slice(0, n).reduce((sum, v) => sum + v, 0);
+
+/**
  * Every organization side by side.
  *
  * The rest of the app answers questions about one club. This answers the one
  * that needs the others in frame — whether the farm system is actually any
  * good, which is unanswerable without seeing the twenty-nine you are competing
- * with. Talent is OOTP's own scouted ceiling, summed over the men in the
- * system, so it reads as "how much future is in there" rather than a ranking of
- * today's results.
+ * with. Talent is OOTP's own scouted ceiling, summed over a system's ten best
+ * prospects, so it reads as "how much future is in there" rather than a ranking
+ * of today's results or of how many bodies the club has signed.
  */
 franchiseRoutes.get('/org-comparison/:orgId', (req, res) => {
   const orgId = Number(req.params.orgId);
@@ -141,23 +166,29 @@ franchiseRoutes.get('/org-comparison/:orgId', (req, res) => {
     player_id: number; org: number; level: number; overall: number; talent: number; age: number;
   }>;
 
-  const acc = new Map<
-    number,
-    { mlb: number; farm: number; farmCount: number; topFarm: number; topId: number | null; young: number }
-  >();
+  /*
+   * The farm men are kept as lists rather than running totals: the rank is
+   * taken from the best few of them, and a total cannot tell you which those
+   * were. `farm.length` is the headcount, shown for context and not ranked.
+   */
+  interface Tally {
+    mlb: number; farm: number[]; young: number[]; topFarm: number; topId: number | null;
+  }
+  const fresh = (): Tally => ({ mlb: 0, farm: [], young: [], topFarm: 0, topId: null });
+  const acc = new Map<number, Tally>();
   for (const r of rows) {
-    const cur = acc.get(r.org) ?? { mlb: 0, farm: 0, farmCount: 0, topFarm: 0, topId: null, young: 0 };
+    const cur = acc.get(r.org) ?? fresh();
     if (r.level === 1) {
       cur.mlb += r.overall ?? 0;
     } else {
-      cur.farm += r.talent ?? 0;
-      cur.farmCount += 1;
-      if ((r.talent ?? 0) > cur.topFarm) {
-        cur.topFarm = r.talent ?? 0;
+      const talent = r.talent ?? 0;
+      cur.farm.push(talent);
+      if (talent > cur.topFarm) {
+        cur.topFarm = talent;
         cur.topId = r.player_id;
       }
       // Talent that is also young is worth more than the same talent at 26
-      if (r.age <= 21) cur.young += r.talent ?? 0;
+      if (r.age <= 21) cur.young.push(talent);
     }
     acc.set(r.org, cur);
   }
@@ -186,19 +217,22 @@ franchiseRoutes.get('/org-comparison/:orgId', (req, res) => {
   }
 
   const list = clubs.map((c) => {
-    const a = acc.get(c.team_id) ?? { mlb: 0, farm: 0, farmCount: 0, topFarm: 0, topId: null, young: 0 };
+    const a = acc.get(c.team_id) ?? fresh();
     const rec = records.get(c.team_id) ?? null;
     return {
       team_id: c.team_id,
       team: c.label,
       isOrg: c.team_id === orgId,
       mlbTalent: Math.round(a.mlb),
-      farmTalent: Math.round(a.farm),
-      farmCount: a.farmCount,
+      // The ten best, not everyone: see TOP_PROSPECTS for why
+      farmTalent: Math.round(bestSum(a.farm)),
+      farmCount: a.farm.length,
       topProspect: Math.round(a.topFarm),
       topProspectId: a.topId,
       topProspectName: a.topId !== null ? (names.get(a.topId) ?? null) : null,
-      youngTalent: Math.round(a.young),
+      // The same rule among the men aged 21 and under, or this column would
+      // be the headcount of teenagers
+      youngTalent: Math.round(bestSum(a.young)),
       w: rec?.w ?? null,
       l: rec?.l ?? null,
     };

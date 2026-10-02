@@ -1,0 +1,1568 @@
+{
+ "il60OnFortyMan": [
+  {
+   "org": "Arizona Diamondbacks",
+   "player": "Jurrangelo Cijntje",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Atlanta Braves",
+   "player": "Bryce Elder",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 34
+  },
+  {
+   "org": "Austin Impact",
+   "player": "AJ Smith-Shawver",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 41
+  },
+  {
+   "org": "Baltimore Orioles",
+   "player": "Levi Wells",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "Baltimore Orioles",
+   "player": "Trey Gibson",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "Boston Red Sox",
+   "player": "Garrett Crochet",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  },
+  {
+   "org": "Chicago White Sox",
+   "player": "Hagen Smith",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Chicago White Sox",
+   "player": "Shane Murphy",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Chicago White Sox",
+   "player": "Will Vest",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Chicago Cubs",
+   "player": "Braxton Garrett",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  },
+  {
+   "org": "Cincinnati Reds",
+   "player": "Frankie Montas",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 41
+  },
+  {
+   "org": "Cleveland Guardians",
+   "player": "Foster Griffin",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Cleveland Guardians",
+   "player": "Zach Ehrhard",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Cleveland Guardians",
+   "player": "Khal Stephen",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Colorado Rockies",
+   "player": "Brandon Walter",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  },
+  {
+   "org": "Colorado Rockies",
+   "player": "Daniel Espino",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  },
+  {
+   "org": "Houston Astros",
+   "player": "Reese Olson",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 38
+  },
+  {
+   "org": "Houston Astros",
+   "player": "Josh Hader",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 38
+  },
+  {
+   "org": "Las Vegas Athletics",
+   "player": "Hunter Bigge",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Las Vegas Athletics",
+   "player": "Drew Burress",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Las Vegas Athletics",
+   "player": "Johan Oviedo",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "Miami Marlins",
+   "player": "Xavier Edwards",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 38
+  },
+  {
+   "org": "New York Yankees",
+   "player": "David Bednar",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 43
+  },
+  {
+   "org": "New York Yankees",
+   "player": "Luis Garcia",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 43
+  },
+  {
+   "org": "New York Yankees",
+   "player": "Jonathan Lo\u00e1isiga",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 43
+  },
+  {
+   "org": "New York Mets",
+   "player": "Pierce Johnson",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "New York Mets",
+   "player": "Jonah Tong",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Philadelphia Phillies",
+   "player": "Saul Teran",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 36
+  },
+  {
+   "org": "Pittsburgh Pirates",
+   "player": "Braxton Ashcraft",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "Pittsburgh Pirates",
+   "player": "Justin Lawrence",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "Portland Griffons",
+   "player": "Aron Estrada",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 37
+  },
+  {
+   "org": "San Diego Padres",
+   "player": "Carson Whisenhunt",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "San Diego Padres",
+   "player": "Ryan Borucki",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "San Francisco Giants",
+   "player": "Jacob Bresnahan",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  },
+  {
+   "org": "Seattle Mariners",
+   "player": "Mason Peters",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "Seattle Mariners",
+   "player": "Jake Brink",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 42
+  },
+  {
+   "org": "St. Louis Cardinals",
+   "player": "Michael McGreevy",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "St. Louis Cardinals",
+   "player": "Clay Holmes",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Tampa Bay Rays",
+   "player": "Bryan Baker",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 41
+  },
+  {
+   "org": "Toronto Blue Jays",
+   "player": "Alonzo Tredwell",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 40
+  },
+  {
+   "org": "Washington Nationals",
+   "player": "CJ Abrams",
+   "status": "IL-60",
+   "level": "MLB",
+   "fortyMan": 39
+  }
+ ],
+ "activeOutOfOptionsUnflagged": [
+  [
+   "Arizona Diamondbacks",
+   "Trevor Richards",
+   35
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Sam Hentges",
+   31
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Pavin Smith",
+   32
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Blake Walston",
+   26
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Tommy Henry",
+   30
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Ren\u00e9 Pinto",
+   31
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Jesus Sanchez",
+   30
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Tyler Locklear",
+   27
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Adael Amador",
+   25
+  ],
+  [
+   "Arizona Diamondbacks",
+   "Mitch Bratt",
+   24
+  ],
+  [
+   "Atlanta Braves",
+   "Leo Rivas",
+   30
+  ],
+  [
+   "Atlanta Braves",
+   "Gavin Sheets",
+   32
+  ],
+  [
+   "Atlanta Braves",
+   "Cade Marlowe",
+   30
+  ],
+  [
+   "Atlanta Braves",
+   "Jakob Junis",
+   35
+  ],
+  [
+   "Atlanta Braves",
+   "Reynaldo Lopez",
+   34
+  ],
+  [
+   "Atlanta Braves",
+   "Jose Barrero",
+   30
+  ],
+  [
+   "Austin Impact",
+   "Kyle Hart",
+   35
+  ],
+  [
+   "Austin Impact",
+   "Grant Holmes",
+   32
+  ],
+  [
+   "Austin Impact",
+   "Josh Sborz",
+   34
+  ],
+  [
+   "Austin Impact",
+   "Orlando Arcia",
+   33
+  ],
+  [
+   "Austin Impact",
+   "Dietrich Enns",
+   36
+  ],
+  [
+   "Austin Impact",
+   "Gregory Soto",
+   33
+  ],
+  [
+   "Austin Impact",
+   "Matt Gage",
+   35
+  ],
+  [
+   "Austin Impact",
+   "Ramon Laureano",
+   33
+  ],
+  [
+   "Austin Impact",
+   "Mason Englert",
+   28
+  ],
+  [
+   "Austin Impact",
+   "Hancel Rincon",
+   26
+  ],
+  [
+   "Austin Impact",
+   "Yorman Gomez",
+   25
+  ],
+  [
+   "Baltimore Orioles",
+   "Blaze Alexander",
+   28
+  ],
+  [
+   "Baltimore Orioles",
+   "Trevor Story",
+   35
+  ],
+  [
+   "Baltimore Orioles",
+   "Nick Martinez",
+   37
+  ],
+  [
+   "Baltimore Orioles",
+   "Paul Sewald",
+   37
+  ],
+  [
+   "Baltimore Orioles",
+   "Ray Kerr",
+   33
+  ],
+  [
+   "Baltimore Orioles",
+   "Huascar Brazoban",
+   38
+  ],
+  [
+   "Baltimore Orioles",
+   "Bryan Abreu",
+   31
+  ],
+  [
+   "Boston Red Sox",
+   "Vimael Machin",
+   34
+  ],
+  [
+   "Boston Red Sox",
+   "Jake Bennett",
+   27
+  ],
+  [
+   "Boston Red Sox",
+   "Romy Gonzalez",
+   31
+  ],
+  [
+   "Boston Red Sox",
+   "Curtis Mead",
+   27
+  ],
+  [
+   "Chicago White Sox",
+   "John King",
+   33
+  ],
+  [
+   "Chicago White Sox",
+   "Luis Vazquez",
+   28
+  ],
+  [
+   "Chicago White Sox",
+   "Yohan Ramirez",
+   33
+  ],
+  [
+   "Chicago White Sox",
+   "Lourdes Gurriel Jr.",
+   34
+  ],
+  [
+   "Chicago White Sox",
+   "Davis Martin",
+   31
+  ],
+  [
+   "Chicago White Sox",
+   "Drew Romo",
+   26
+  ],
+  [
+   "Chicago Cubs",
+   "Miguel Amaya",
+   29
+  ],
+  [
+   "Chicago Cubs",
+   "Justin Steele",
+   32
+  ],
+  [
+   "Chicago Cubs",
+   "Gabriel Arias",
+   28
+  ],
+  [
+   "Chicago Cubs",
+   "Alex Bregman",
+   34
+  ],
+  [
+   "Chicago Cubs",
+   "Tyler Ferguson",
+   34
+  ],
+  [
+   "Chicago Cubs",
+   "Chase Shugart",
+   31
+  ],
+  [
+   "Chicago Cubs",
+   "Gustavo Campero",
+   30
+  ],
+  [
+   "Chicago Cubs",
+   "George Valera",
+   27
+  ],
+  [
+   "Chicago Cubs",
+   "Luisangel Acuna",
+   26
+  ],
+  [
+   "Cincinnati Reds",
+   "Ian Hamilton",
+   32
+  ],
+  [
+   "Cincinnati Reds",
+   "Keston Hiura",
+   31
+  ],
+  [
+   "Cincinnati Reds",
+   "Dane Myers",
+   32
+  ],
+  [
+   "Cincinnati Reds",
+   "Jacob Waguespack",
+   34
+  ],
+  [
+   "Cincinnati Reds",
+   "Yerry De Los Santos",
+   30
+  ],
+  [
+   "Cincinnati Reds",
+   "Gary Sanchez",
+   35
+  ],
+  [
+   "Cincinnati Reds",
+   "Nick Pivetta",
+   35
+  ],
+  [
+   "Cincinnati Reds",
+   "Mike Tauchman",
+   37
+  ],
+  [
+   "Cincinnati Reds",
+   "Julian Fernandez",
+   32
+  ],
+  [
+   "Cincinnati Reds",
+   "Jacob Webb",
+   34
+  ],
+  [
+   "Cincinnati Reds",
+   "Noelvi Marte",
+   26
+  ],
+  [
+   "Cleveland Guardians",
+   "Brock Burke",
+   31
+  ],
+  [
+   "Cleveland Guardians",
+   "Darell Hernaiz",
+   26
+  ],
+  [
+   "Cleveland Guardians",
+   "Hunter Gaddis",
+   30
+  ],
+  [
+   "Cleveland Guardians",
+   "Brayan Rocchio",
+   27
+  ],
+  [
+   "Cleveland Guardians",
+   "Tim Herrin",
+   31
+  ],
+  [
+   "Cleveland Guardians",
+   "Gordon Graceffo",
+   28
+  ],
+  [
+   "Colorado Rockies",
+   "Mitch White",
+   33
+  ],
+  [
+   "Colorado Rockies",
+   "Jake McCarthy",
+   30
+  ],
+  [
+   "Colorado Rockies",
+   "Zac Veen",
+   26
+  ],
+  [
+   "Colorado Rockies",
+   "Jordan Beck",
+   27
+  ],
+  [
+   "Colorado Rockies",
+   "Shawn Armstrong",
+   37
+  ],
+  [
+   "Detroit Tigers",
+   "Framber Valdez",
+   34
+  ],
+  [
+   "Detroit Tigers",
+   "Wenceel Perez",
+   28
+  ],
+  [
+   "Detroit Tigers",
+   "Keider Montero",
+   27
+  ],
+  [
+   "Detroit Tigers",
+   "Ryan O'Hearn",
+   34
+  ],
+  [
+   "Detroit Tigers",
+   "David Hamilton",
+   30
+  ],
+  [
+   "Detroit Tigers",
+   "Drew Anderson",
+   34
+  ],
+  [
+   "Detroit Tigers",
+   "Dylan Smith",
+   27
+  ],
+  [
+   "Houston Astros",
+   "Alex Faedo",
+   32
+  ],
+  [
+   "Houston Astros",
+   "Joe Boyle",
+   28
+  ],
+  [
+   "Houston Astros",
+   "Luis Gil",
+   29
+  ],
+  [
+   "Houston Astros",
+   "Joey Wiemer",
+   29
+  ],
+  [
+   "Houston Astros",
+   "Peter Lambert",
+   31
+  ],
+  [
+   "Houston Astros",
+   "Chad Patrick",
+   29
+  ],
+  [
+   "Houston Astros",
+   "Brice Matthews",
+   26
+  ],
+  [
+   "Kansas City Royals",
+   "Nick Loftin",
+   29
+  ],
+  [
+   "Kansas City Royals",
+   "Walker Buehler",
+   33
+  ],
+  [
+   "Kansas City Royals",
+   "Randy Dobnak",
+   33
+  ],
+  [
+   "Kansas City Royals",
+   "Jesse Scholtens",
+   34
+  ],
+  [
+   "Kansas City Royals",
+   "Luke Little",
+   27
+  ],
+  [
+   "Las Vegas Athletics",
+   "Elvis Alvarado",
+   29
+  ],
+  [
+   "Las Vegas Athletics",
+   "Justin Sterner",
+   31
+  ],
+  [
+   "Las Vegas Athletics",
+   "Michael Rucker",
+   34
+  ],
+  [
+   "Las Vegas Athletics",
+   "Joey Cantillo",
+   28
+  ],
+  [
+   "Las Vegas Athletics",
+   "Drew Rom",
+   28
+  ],
+  [
+   "Las Vegas Athletics",
+   "Austin Hedges",
+   35
+  ],
+  [
+   "Las Vegas Athletics",
+   "Jesus Tinoco",
+   33
+  ],
+  [
+   "Las Vegas Athletics",
+   "Josh Rojas",
+   33
+  ],
+  [
+   "Las Vegas Athletics",
+   "Braden Nett",
+   25
+  ],
+  [
+   "Los Angeles Angels",
+   "Edward Cabrera",
+   30
+  ],
+  [
+   "Los Angeles Angels",
+   "Ryan Kreidler",
+   30
+  ],
+  [
+   "Los Angeles Angels",
+   "Tayron Guerrero",
+   37
+  ],
+  [
+   "Los Angeles Angels",
+   "Jorge Soler",
+   36
+  ],
+  [
+   "Los Angeles Angels",
+   "Tyler O'Neill",
+   32
+  ],
+  [
+   "Los Angeles Angels",
+   "Dane Dunning",
+   33
+  ],
+  [
+   "Los Angeles Angels",
+   "Adbert Alzolay",
+   33
+  ],
+  [
+   "Los Angeles Angels",
+   "Josh Lowe",
+   30
+  ],
+  [
+   "Los Angeles Angels",
+   "Blake Hunt",
+   29
+  ],
+  [
+   "Los Angeles Angels",
+   "Zack Kelly",
+   33
+  ],
+  [
+   "Los Angeles Angels",
+   "Vaughn Grissom",
+   27
+  ],
+  [
+   "Los Angeles Angels",
+   "Moises Chace",
+   24
+  ],
+  [
+   "Los Angeles Angels",
+   "Drew Sommers",
+   27
+  ],
+  [
+   "Los Angeles Dodgers",
+   "Evan Phillips",
+   33
+  ],
+  [
+   "Los Angeles Dodgers",
+   "Blake Snell",
+   35
+  ],
+  [
+   "Los Angeles Dodgers",
+   "Steven Okert",
+   36
+  ],
+  [
+   "Los Angeles Dodgers",
+   "Grant Anderson",
+   30
+  ],
+  [
+   "Miami Marlins",
+   "Tyler Phillips",
+   30
+  ],
+  [
+   "Miami Marlins",
+   "Otto Lopez",
+   29
+  ],
+  [
+   "Miami Marlins",
+   "Ronny Henriquez",
+   27
+  ],
+  [
+   "Miami Marlins",
+   "Agustin Ramirez",
+   26
+  ],
+  [
+   "Milwaukee Brewers",
+   "Carlos Vargas",
+   28
+  ],
+  [
+   "Milwaukee Brewers",
+   "Angel Zerpa",
+   28
+  ],
+  [
+   "Milwaukee Brewers",
+   "Edmundo Sosa",
+   32
+  ],
+  [
+   "Milwaukee Brewers",
+   "Randy Rodriguez",
+   28
+  ],
+  [
+   "Milwaukee Brewers",
+   "Robert Gasser",
+   28
+  ],
+  [
+   "Milwaukee Brewers",
+   "Jose Fermin",
+   26
+  ],
+  [
+   "Minnesota Twins",
+   "Dean Kremer",
+   32
+  ],
+  [
+   "Minnesota Twins",
+   "Matt Wallner",
+   30
+  ],
+  [
+   "Minnesota Twins",
+   "Garrett Cleavinger",
+   34
+  ],
+  [
+   "Minnesota Twins",
+   "Matt Mervis",
+   30
+  ],
+  [
+   "Minnesota Twins",
+   "Matthew Boyd",
+   37
+  ],
+  [
+   "Minnesota Twins",
+   "Kody Funderburk",
+   31
+  ],
+  [
+   "Minnesota Twins",
+   "Alan Roden",
+   28
+  ],
+  [
+   "New York Yankees",
+   "Sean Newcomb",
+   34
+  ],
+  [
+   "New York Yankees",
+   "Brent Headrick",
+   30
+  ],
+  [
+   "New York Yankees",
+   "Luis Garcia Jr.",
+   27
+  ],
+  [
+   "New York Yankees",
+   "Edwin Uceta",
+   30
+  ],
+  [
+   "New York Yankees",
+   "Kody Clemens",
+   32
+  ],
+  [
+   "New York Yankees",
+   "Samad Taylor",
+   29
+  ],
+  [
+   "New York Yankees",
+   "Zach Eflin",
+   34
+  ],
+  [
+   "New York Yankees",
+   "Jose Siri",
+   32
+  ],
+  [
+   "New York Yankees",
+   "Jordan Romano",
+   35
+  ],
+  [
+   "New York Yankees",
+   "Heliot Ramos",
+   28
+  ],
+  [
+   "New York Mets",
+   "Cristian Pache",
+   29
+  ],
+  [
+   "New York Mets",
+   "Tobias Myers",
+   29
+  ],
+  [
+   "New York Mets",
+   "Kevin Gausman",
+   37
+  ],
+  [
+   "New York Mets",
+   "Matt Thaiss",
+   33
+  ],
+  [
+   "New York Mets",
+   "Seranthony Dominguez",
+   33
+  ],
+  [
+   "New York Mets",
+   "Mark Vientos",
+   28
+  ],
+  [
+   "New York Mets",
+   "Dedniel Nunez",
+   31
+  ],
+  [
+   "Philadelphia Phillies",
+   "Derek Hill",
+   32
+  ],
+  [
+   "Philadelphia Phillies",
+   "Jonathan Bowlan",
+   31
+  ],
+  [
+   "Philadelphia Phillies",
+   "Gregory Santos",
+   28
+  ],
+  [
+   "Philadelphia Phillies",
+   "Caleb Kilian",
+   30
+  ],
+  [
+   "Philadelphia Phillies",
+   "Gabe Speier",
+   33
+  ],
+  [
+   "Philadelphia Phillies",
+   "Cristopher Sanchez",
+   31
+  ],
+  [
+   "Philadelphia Phillies",
+   "Luis Campusano",
+   29
+  ],
+  [
+   "Philadelphia Phillies",
+   "Johan Rojas",
+   27
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Sean Reid-Foley",
+   32
+  ],
+  [
+   "Pittsburgh Pirates",
+   "JoJo Romero",
+   31
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Lucas Giolito",
+   33
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Ryan McMahon",
+   33
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Thomas Pannone",
+   34
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Brock Stewart",
+   36
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Jacob Lopez",
+   30
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Spencer Horwitz",
+   30
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Nick Mears",
+   31
+  ],
+  [
+   "Pittsburgh Pirates",
+   "Edgar Quero",
+   25
+  ],
+  [
+   "Portland Griffons",
+   "Michael Toglia",
+   29
+  ],
+  [
+   "Portland Griffons",
+   "Tyler Fitzgerald",
+   30
+  ],
+  [
+   "Portland Griffons",
+   "Isaac Paredes",
+   29
+  ],
+  [
+   "Portland Griffons",
+   "Jahmai Jones",
+   30
+  ],
+  [
+   "Portland Griffons",
+   "Aroldis Chapman",
+   40
+  ],
+  [
+   "Portland Griffons",
+   "Justyn-Henry Malloy",
+   28
+  ],
+  [
+   "Portland Griffons",
+   "Joey Loperfido",
+   29
+  ],
+  [
+   "Portland Griffons",
+   "Nick Sogard",
+   30
+  ],
+  [
+   "Portland Griffons",
+   "Carlos Estevez",
+   35
+  ],
+  [
+   "Portland Griffons",
+   "Kyle Hurt",
+   29
+  ],
+  [
+   "Portland Griffons",
+   "Nate Eaton",
+   31
+  ],
+  [
+   "Portland Griffons",
+   "Luis Mey",
+   26
+  ],
+  [
+   "Portland Griffons",
+   "Zebby Matthews",
+   27
+  ],
+  [
+   "Portland Griffons",
+   "Nick Morabito",
+   25
+  ],
+  [
+   "Portland Griffons",
+   "Leandro Lopez",
+   25
+  ],
+  [
+   "San Diego Padres",
+   "Jhony Brito",
+   30
+  ],
+  [
+   "San Diego Padres",
+   "Mickey Moniak",
+   30
+  ],
+  [
+   "San Diego Padres",
+   "Josh Winckowski",
+   29
+  ],
+  [
+   "San Diego Padres",
+   "Jake Bauers",
+   32
+  ],
+  [
+   "San Diego Padres",
+   "Jo Adell",
+   29
+  ],
+  [
+   "San Diego Padres",
+   "Jose Butto",
+   30
+  ],
+  [
+   "San Diego Padres",
+   "Caden Dana",
+   24
+  ],
+  [
+   "San Diego Padres",
+   "Will Wagner",
+   29
+  ],
+  [
+   "San Francisco Giants",
+   "Blaine Crim",
+   30
+  ],
+  [
+   "San Francisco Giants",
+   "Matt Festa",
+   35
+  ],
+  [
+   "San Francisco Giants",
+   "Robert Stephenson",
+   35
+  ],
+  [
+   "San Francisco Giants",
+   "Oscar Mercado",
+   33
+  ],
+  [
+   "San Francisco Giants",
+   "Manuel Rodriguez",
+   31
+  ],
+  [
+   "San Francisco Giants",
+   "Rafael Devers",
+   31
+  ],
+  [
+   "San Francisco Giants",
+   "Jesus Rodriguez",
+   26
+  ],
+  [
+   "San Francisco Giants",
+   "Yanquiel Fernandez",
+   25
+  ],
+  [
+   "Seattle Mariners",
+   "Akil Baddoo",
+   29
+  ],
+  [
+   "Seattle Mariners",
+   "Joey Wentz",
+   30
+  ],
+  [
+   "Seattle Mariners",
+   "Jerar Encarnacion",
+   30
+  ],
+  [
+   "Seattle Mariners",
+   "Luke Raley",
+   33
+  ],
+  [
+   "Seattle Mariners",
+   "Jake Bird",
+   32
+  ],
+  [
+   "Seattle Mariners",
+   "Matthew Liberatore",
+   28
+  ],
+  [
+   "Seattle Mariners",
+   "Alejo Lopez",
+   32
+  ],
+  [
+   "Seattle Mariners",
+   "Yacksel Rios",
+   34
+  ],
+  [
+   "Seattle Mariners",
+   "Phil Bickford",
+   32
+  ],
+  [
+   "Seattle Mariners",
+   "Javy Guerra",
+   32
+  ],
+  [
+   "Seattle Mariners",
+   "Jhonny Pereda",
+   32
+  ],
+  [
+   "Seattle Mariners",
+   "Shawn Dubin",
+   32
+  ],
+  [
+   "St. Louis Cardinals",
+   "Victor Scott II",
+   27
+  ],
+  [
+   "St. Louis Cardinals",
+   "Shane Bieber",
+   32
+  ],
+  [
+   "St. Louis Cardinals",
+   "Ivan Herrera",
+   27
+  ],
+  [
+   "St. Louis Cardinals",
+   "Riley O'Brien",
+   33
+  ],
+  [
+   "St. Louis Cardinals",
+   "Joe Mack",
+   25
+  ],
+  [
+   "St. Louis Cardinals",
+   "JJ Bleday",
+   30
+  ],
+  [
+   "St. Louis Cardinals",
+   "Ryan Fernandez",
+   29
+  ],
+  [
+   "St. Louis Cardinals",
+   "Miguel And\u00fajar",
+   33
+  ],
+  [
+   "St. Louis Cardinals",
+   "Shay Whitcomb",
+   29
+  ],
+  [
+   "St. Louis Cardinals",
+   "Tink Hence",
+   25
+  ],
+  [
+   "St. Louis Cardinals",
+   "Joshua Baez",
+   24
+  ],
+  [
+   "St. Louis Cardinals",
+   "Thomas Saggese",
+   26
+  ],
+  [
+   "Tampa Bay Rays",
+   "Jonathan Aranda",
+   29
+  ],
+  [
+   "Tampa Bay Rays",
+   "Jack Suwinski",
+   29
+  ],
+  [
+   "Tampa Bay Rays",
+   "Rico Garcia",
+   34
+  ],
+  [
+   "Tampa Bay Rays",
+   "Nick Madrigal",
+   31
+  ],
+  [
+   "Tampa Bay Rays",
+   "Ryan Vilade",
+   29
+  ],
+  [
+   "Tampa Bay Rays",
+   "Brooks Raley",
+   39
+  ],
+  [
+   "Tampa Bay Rays",
+   "Cam Booser",
+   36
+  ],
+  [
+   "Tampa Bay Rays",
+   "Victor Mesa Jr.",
+   26
+  ],
+  [
+   "Texas Rangers",
+   "Jack Flaherty",
+   32
+  ],
+  [
+   "Texas Rangers",
+   "Ronny Mauricio",
+   27
+  ],
+  [
+   "Texas Rangers",
+   "Cam Sanders",
+   31
+  ],
+  [
+   "Texas Rangers",
+   "Tomas Nido",
+   34
+  ],
+  [
+   "Texas Rangers",
+   "Anthony Kay",
+   33
+  ],
+  [
+   "Texas Rangers",
+   "Luis Robert Jr.",
+   30
+  ],
+  [
+   "Texas Rangers",
+   "Jose Corniell",
+   24
+  ],
+  [
+   "Texas Rangers",
+   "Emiliano Teodo",
+   27
+  ],
+  [
+   "Texas Rangers",
+   "Alejandro Osuna",
+   25
+  ],
+  [
+   "Toronto Blue Jays",
+   "Ernie Clement",
+   32
+  ],
+  [
+   "Toronto Blue Jays",
+   "Kirby Yates",
+   41
+  ],
+  [
+   "Toronto Blue Jays",
+   "Jurickson Profar",
+   35
+  ],
+  [
+   "Toronto Blue Jays",
+   "Osleivis Basabe",
+   27
+  ],
+  [
+   "Washington Nationals",
+   "Connor Phillips",
+   27
+  ],
+  [
+   "Washington Nationals",
+   "Randal Grichuk",
+   36
+  ],
+  [
+   "Washington Nationals",
+   "Javier Baez",
+   35
+  ],
+  [
+   "Washington Nationals",
+   "Mark Leiter Jr.",
+   37
+  ],
+  [
+   "Washington Nationals",
+   "Keibert Ruiz",
+   29
+  ],
+  [
+   "Washington Nationals",
+   "Jose Tena",
+   27
+  ],
+  [
+   "Washington Nationals",
+   "Michael Grove",
+   31
+  ]
+ ]
+}

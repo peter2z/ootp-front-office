@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { apiGet, type Org } from '../api';
 import { PlayerLink, Tip } from '../playerModal';
 import { ColumnPicker } from '../ColumnPicker';
@@ -53,6 +53,40 @@ const NO_FILTERS: Filters = {
   position: '', role: '', bats: '', throws: '', minAge: '', maxAge: '', minPt: '',
 };
 
+/**
+ * One row of the table.
+ *
+ * Its own memoised component so that asking for another hundred players draws
+ * the hundred, and not the six hundred already on the screen as well: the rows
+ * a reader has been given are the same objects after the next page arrives, so
+ * nothing about them has changed and React need not look at them again.
+ */
+const PlayerRow = memo(function PlayerRow({ p, group, columns }: {
+  p: LeaguePlayer; group: StatGroup; columns: string[];
+}) {
+  return (
+    <tr>
+      <td className="name"><PlayerLink id={p.player_id}>{p.name}</PlayerLink></td>
+      <td>{p.age}</td>
+      <td>{p.positionName}</td>
+      <td>{p.bats}/{p.throws}</td>
+      <td>
+        {p.levelName && <span className="level-tag">{p.levelName}</span>} {p.team ?? '—'}
+      </td>
+      {columns.map((key) => {
+        const def = findStat(group, key);
+        if (!def) return null;
+        const value = p.stats?.[key] ?? null;
+        return (
+          <td key={key} className="num" style={{ color: plusColor(def, value) }}>
+            {p.stats ? formatStat(def, value, p.stats) : ''}
+          </td>
+        );
+      })}
+    </tr>
+  );
+});
+
 export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -60,7 +94,6 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
   const [scope, setScope] = useState<'league' | 'org' | 'fa'>('league');
   const [group, setGroup] = useState<StatGroup>('batting');
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
-  const [offset, setOffset] = useState(0);
 
   /*
    * Which column the table is ordered by, and which way.
@@ -71,7 +104,19 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
    * leader in a category could sit on page three.
    */
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
-  const [data, setData] = useState<PlayersResponse | null>(null);
+  /*
+   * What has been loaded of this search, and how much of it there is.
+   *
+   * A hundred rows are asked for and a hundred are held. The rest stay on the
+   * server until the reader asks for another hundred, so the table is as
+   * heavy as what has been shown and no heavier, however many players match:
+   * the majors alone are six hundred and seventy-eight batters, and a search
+   * across every level is nearly five thousand. `total` is the whole match,
+   * from the server, and is null until the first page has arrived.
+   */
+  const [rows, setRows] = useState<LeaguePlayer[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [battingCols, setBattingCols] = useState(() => loadColumns('batting'));
@@ -81,18 +126,15 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
   // Debounce so typing a name doesn't fire a query per keystroke
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      setDebounced(query);
-      setOffset(0);
-    }, 300);
+    timer.current = setTimeout(() => setDebounced(query), 300);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
   }, [query]);
 
-  useEffect(() => {
-    setData(null);
-    const params = new URLSearchParams({ group, limit: String(PAGE), offset: String(offset) });
+  /** Which players, in what order: the search itself, without the page cut out of it. */
+  const search = useMemo(() => {
+    const params = new URLSearchParams({ group });
     if (debounced.trim().length >= 2) params.set('q', debounced.trim());
     if (scope === 'fa') params.set('freeAgents', '1');
     else {
@@ -104,8 +146,63 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
       params.set('sort', sort.key);
       params.set('dir', sort.dir);
     }
-    apiGet<PlayersResponse>(`/api/players?${params}`).then(setData).catch((e) => setError(e.message));
-  }, [debounced, level, scope, group, offset, orgId, filters, sort]);
+    return params.toString();
+  }, [debounced, level, scope, group, orgId, filters, sort]);
+
+  /*
+   * Any change to the search starts again from the top of it, which is what a
+   * reader who has changed the question wants and spares every control from
+   * remembering to put the page back. The generation number is how a slow
+   * answer to a question already abandoned is told apart from the answer to
+   * the current one, and dropped.
+   */
+  const generation = useRef(0);
+  const asking = useRef(false);
+  useEffect(() => {
+    const mine = ++generation.current;
+    asking.current = false;
+    setRows([]);
+    setTotal(null);
+    setLoadingMore(false);
+    setError(null);
+    apiGet<PlayersResponse>(`/api/players?${search}&limit=${PAGE}&offset=0`)
+      .then((r) => {
+        if (generation.current !== mine) return;
+        setRows(r.players);
+        setTotal(r.total);
+      })
+      .catch((e) => {
+        if (generation.current === mine) setError(e.message);
+      });
+  }, [search]);
+
+  /** The next hundred, from where the loaded ones end. */
+  const showMore = () => {
+    // A second click before the first answer is back would ask for the same hundred twice
+    if (asking.current) return;
+    asking.current = true;
+    const mine = generation.current;
+    setLoadingMore(true);
+    apiGet<PlayersResponse>(`/api/players?${search}&limit=${PAGE}&offset=${rows.length}`)
+      .then((r) => {
+        if (generation.current !== mine) return;
+        setRows((held) => {
+          // Another import between the two requests can shift the list under us
+          const seen = new Set(held.map((p) => p.player_id));
+          return [...held, ...r.players.filter((p) => !seen.has(p.player_id))];
+        });
+        setTotal(r.total);
+      })
+      .catch((e) => {
+        if (generation.current === mine) setError(e.message);
+      })
+      .finally(() => {
+        if (generation.current === mine) {
+          asking.current = false;
+          setLoadingMore(false);
+        }
+      });
+  };
 
   /**
    * A header you can click to order by.
@@ -138,24 +235,23 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
      */
     const label = typeof children === 'string' ? children : null;
     const definition = tip ?? (label ? define(label) : undefined);
+    // The button is the one tab stop; the tip inside it describes the button
+    // rather than adding a stop of its own
+    const tipId = `tip-${sortKey}`;
     const inner = (
       <>
-        {definition ? <Tip label={children} tip={definition} /> : children}
+        {definition ? <Tip label={children} tip={definition} inControl popId={tipId} /> : children}
         {active && <span className="sort-arrow">{sort!.dir === 'asc' ? '▲' : '▼'}</span>}
       </>
     );
     return (
       <th className={active ? 'sortable sorted' : 'sortable'}>
-        <button type="button" onClick={() => { setOffset(0); cycle(); }}>{inner}</button>
+        <button type="button" onClick={cycle} aria-describedby={definition ? tipId : undefined}>{inner}</button>
       </th>
     );
   }
 
-  // Changing what you are looking for should not leave you on page four of it
-  const setFilter = (key: keyof Filters, value: string) => {
-    setFilters((f) => ({ ...f, [key]: value }));
-    setOffset(0);
-  };
+  const setFilter = (key: keyof Filters, value: string) => setFilters((f) => ({ ...f, [key]: value }));
   const active = Object.values(filters).filter(Boolean).length;
 
   const columns = group === 'batting' ? battingCols : pitchingCols;
@@ -179,20 +275,20 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
           onChange={(e) => setQuery(e.target.value)}
         />
         <div className="tabs">
-          <button className={group === 'batting' ? 'active' : ''} onClick={() => { setGroup('batting'); setOffset(0); }}>
+          <button className={group === 'batting' ? 'active' : ''} onClick={() => setGroup('batting')}>
             Batters
           </button>
-          <button className={group === 'pitching' ? 'active' : ''} onClick={() => { setGroup('pitching'); setOffset(0); }}>
+          <button className={group === 'pitching' ? 'active' : ''} onClick={() => setGroup('pitching')}>
             Pitchers
           </button>
         </div>
-        <select value={scope} onChange={(e) => { setScope(e.target.value as typeof scope); setOffset(0); }}>
+        <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)} aria-label="Scope">
           <option value="league">Whole league</option>
           <option value="org">{orgLabel} only</option>
           <option value="fa">Free agents</option>
         </select>
         {scope !== 'fa' && (
-          <select value={level} onChange={(e) => { setLevel(e.target.value); setOffset(0); }}>
+          <select value={level} onChange={(e) => setLevel(e.target.value)} aria-label="Level">
             {LEVELS.map(([v, label]) => (
               <option key={v} value={v}>{label}</option>
             ))}
@@ -203,17 +299,18 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
         <select
           value={group === 'pitching' ? filters.role : filters.position}
           onChange={(e) => setFilter(group === 'pitching' ? 'role' : 'position', e.target.value)}
+          aria-label={group === 'pitching' ? 'Role' : 'Position'}
         >
           <option value="">Any position</option>
           {(group === 'pitching' ? ROLES : POSITIONS).map(([v, label]) => (
             <option key={v} value={v}>{label}</option>
           ))}
         </select>
-        <select value={filters.bats} onChange={(e) => setFilter('bats', e.target.value)}>
+        <select value={filters.bats} onChange={(e) => setFilter('bats', e.target.value)} aria-label="Bats">
           <option value="">Bats any</option>
           {HANDS.map(([v, label]) => <option key={v} value={v}>Bats {label.toLowerCase()}</option>)}
         </select>
-        <select value={filters.throws} onChange={(e) => setFilter('throws', e.target.value)}>
+        <select value={filters.throws} onChange={(e) => setFilter('throws', e.target.value)} aria-label="Throws">
           <option value="">Throws any</option>
           {HANDS.map(([v, label]) => <option key={v} value={v}>Throws {label.toLowerCase()}</option>)}
         </select>
@@ -232,12 +329,14 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
           value={filters.minPt} onChange={(e) => setFilter('minPt', e.target.value)}
         />
         {active > 0 && (
-          <button onClick={() => { setFilters(NO_FILTERS); setOffset(0); }}>
+          <button onClick={() => setFilters(NO_FILTERS)}>
             Clear {active} filter{active === 1 ? '' : 's'}
           </button>
         )}
         <div className="col-picker-wrap">
-          <button onClick={() => setPickerOpen((v) => !v)}>⚙ Columns</button>
+          <button onClick={() => setPickerOpen((v) => !v)} aria-haspopup="dialog" aria-expanded={pickerOpen}>
+            ⚙ Columns
+          </button>
           {pickerOpen && (
             <ColumnPicker
               group={group}
@@ -250,14 +349,15 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
         </div>
       </div>
 
-      {!data && <p className="muted">Searching…</p>}
+      {total === null && !error && <p className="muted">Searching…</p>}
 
-      {data && (
+      {total !== null && (
         <>
           <p className="muted hint-line">
-            {data.total.toLocaleString()} player{data.total === 1 ? '' : 's'} match
-            {data.total > PAGE && ` — showing ${offset + 1}–${Math.min(offset + PAGE, data.total)}`}
+            {total.toLocaleString()} player{total === 1 ? '' : 's'} match
+            {total > rows.length && ` — showing ${rows.length.toLocaleString()}`}
           </p>
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -275,35 +375,17 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
               </tr>
             </thead>
             <tbody>
-              {data.players.map((p) => (
-                <tr key={p.player_id}>
-                  <td className="name"><PlayerLink id={p.player_id}>{p.name}</PlayerLink></td>
-                  <td>{p.age}</td>
-                  <td>{p.positionName}</td>
-                  <td>{p.bats}/{p.throws}</td>
-                  <td>
-                    {p.levelName && <span className="level-tag">{p.levelName}</span>} {p.team ?? '—'}
-                  </td>
-                  {columns.map((key) => {
-                    const def = findStat(group, key);
-                    if (!def) return null;
-                    const value = p.stats?.[key] ?? null;
-                    return (
-                      <td key={key} className="num" style={{ color: plusColor(def, value) }}>
-                        {p.stats ? formatStat(def, value, p.stats) : ''}
-                      </td>
-                    );
-                  })}
-                </tr>
+              {rows.map((p) => (
+                <PlayerRow key={p.player_id} p={p} group={group} columns={columns} />
               ))}
-              {data.players.length === 0 && (
+              {rows.length === 0 && (
                 <tr>
                   <td colSpan={5 + columns.length} className="muted">
                     No {group === 'batting' ? 'batters' : 'pitchers'} match those filters.
                     {debounced.trim().length >= 2 && (
                       <>
                         {' '}Batters and pitchers are searched separately — try the{' '}
-                        <button className="link-button" onClick={() => { setGroup(group === 'batting' ? 'pitching' : 'batting'); setOffset(0); }}>
+                        <button className="link-button" onClick={() => setGroup(group === 'batting' ? 'pitching' : 'batting')}>
                           {group === 'batting' ? 'Pitchers' : 'Batters'}
                         </button>{' '}
                         tab.
@@ -314,18 +396,16 @@ export function Players({ orgs, orgId }: { orgs: Org[]; orgId: number }) {
               )}
             </tbody>
           </table>
+          </div>
 
-          {data.total > PAGE && (
+          {total > rows.length && (
             <div className="pager">
-              <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
-                ← Previous
+              <button disabled={loadingMore} onClick={showMore}>
+                {loadingMore ? 'Loading…' : `Show ${Math.min(PAGE, total - rows.length).toLocaleString()} more`}
               </button>
               <span className="muted">
-                Page {Math.floor(offset / PAGE) + 1} of {Math.ceil(data.total / PAGE)}
+                {rows.length.toLocaleString()} of {total.toLocaleString()}
               </span>
-              <button disabled={offset + PAGE >= data.total} onClick={() => setOffset(offset + PAGE)}>
-                Next →
-              </button>
             </div>
           )}
         </>

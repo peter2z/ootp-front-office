@@ -176,8 +176,12 @@ function loadCoach(orgId: number, occupation: number): Coach | null {
   );
 }
 
-const money = (n: number): string =>
-  n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${Math.round(n / 1000)}k`;
+// Mirrors formatMoney in src/stats.ts, which the server cannot import: the sign goes before the dollar
+const money = (n: number): string => {
+  const size = Math.abs(n);
+  const text = size >= 1_000_000 ? `$${(size / 1_000_000).toFixed(1)}M` : `$${Math.round(size / 1000)}K`;
+  return n < 0 ? `-${text}` : text;
+};
 
 /** Age, birthplace, time in the game and what he is signed for. */
 function bioLines(c: Coach): string[] {

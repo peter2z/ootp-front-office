@@ -25,15 +25,17 @@ interface Club {
 type SortKey = 'farmRank' | 'mlbRank' | 'youngRank' | 'topProspect' | 'w';
 
 const TIP_FARM =
-  'Every player in the organization below the majors, added up by scouted ceiling. It answers ' +
-  '"how much future is in the system" rather than how good it is today — a deep system of solid ' +
-  'prospects can out-total a thin one holding two stars.';
+  'The ten best prospects in the organization below the majors, added up by scouted ceiling. It ' +
+  'answers "how much future is in the system" rather than how good it is today. Only ten count, ' +
+  'so signing more players cannot lift the rank: three hundred fillers do not out-rank ten real ' +
+  'prospects. The headcount is in the last column, for context.';
 const TIP_MLB =
   "The major-league roster added up by OOTP's current value. This is present strength, which is " +
   'why a club can rank first here and last in the farm.';
 const TIP_YOUNG =
-  'Ceiling held by players aged 21 and under. The same talent is worth more the younger it is, ' +
-  'and this separates a system built on teenagers from one built on 25-year-old Triple-A depth.';
+  'Ceiling held by the ten best prospects aged 21 and under. The same talent is worth more the ' +
+  'younger it is, and this separates a system built on teenagers from one built on 25-year-old ' +
+  'Triple-A depth. Only ten count, so a big draft class does not lift it on numbers alone.';
 
 /**
  * Named rather than numbered: the underlying figure is OOTP's own talent value
@@ -92,6 +94,7 @@ export function OrgComparison({ orgId }: { orgId: number }) {
           <div className="finance-card">
             <span className="muted">Players in the system</span>
             <strong>{me.farmCount}</strong>
+            <span className="muted">headcount, not ranked</span>
           </div>
         </div>
       )}
@@ -99,7 +102,8 @@ export function OrgComparison({ orgId }: { orgId: number }) {
       <p className="muted hint-line">
         Everything here is OOTP&rsquo;s own valuation of your players, added up — useful for placing
         your organization against the rest of the league, but it is a sum of scouting opinions, not
-        a measurement of results. Click a column to re-rank.
+        a measurement of results. The farm and under-22 ranks use each club&rsquo;s ten best
+        prospects, so signing more players cannot lift them. Click a column to re-rank.
       </p>
 
       <table>
@@ -120,7 +124,12 @@ export function OrgComparison({ orgId }: { orgId: number }) {
             <th onClick={() => setSort('topProspect')}>
               <Tip label="Best prospect" tip={TIP_TOP_PROSPECT} />
             </th>
-            <Th className="num">In system</Th>
+            <Th
+              className="num"
+              tip="Everyone the organization has below the majors. Shown for context; it is not part of the farm rank."
+            >
+              In system
+            </Th>
           </tr>
         </thead>
         <tbody>

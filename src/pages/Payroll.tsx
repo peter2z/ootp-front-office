@@ -3,6 +3,7 @@ import { apiGet, apiPut } from '../api';
 import { PlayerLink, Tip } from '../playerModal';
 import { Sparkline } from '../Chart';
 import { Th } from '../Th';
+import { formatMoney, plural } from '../stats';
 
 interface Commitment { year: number; total: number; players: number; headroom: number | null; budgetUsed?: 'expected' | 'flat' }
 interface PayrollPlayer {
@@ -18,6 +19,18 @@ interface PayrollPlayer {
   options: string[];
   deadMoney: boolean;
 }
+/**
+ * One term of the line under the cards. The server works them out and they add
+ * up to the committed total, so the page only prints them.
+ */
+interface ReconcileTerm {
+  key: 'payroll' | 'deadMoney' | 'minors' | 'other';
+  amount: number;
+  players?: number;
+  /** `minors` only: what the committed total charges those players in full. */
+  salary?: number;
+}
+
 interface PayrollData {
   seasonYear: number;
   years: number[];
@@ -26,6 +39,8 @@ interface PayrollData {
     cashTradesAvailable: number; revenue: number; expenses: number;
     budgetBalance: number; market: number; ownerExpectation: number;
   } | null;
+  /** Null when OOTP gave no payroll figure to start from. */
+  reconciliation?: { year: number; committed: number; terms: ReconcileTerm[] } | null;
   deadMoney: { total: number; players: Array<{ player_id: number; name: string; salary: number }> };
   commitments: Commitment[];
   /** What you told the app to expect next season, or null to assume flat. */
@@ -50,11 +65,12 @@ interface OffTheBooks {
   }>;
 }
 
+// Nothing for a missing figure and a dash for a true zero, which a table of
+// salary years needs; the sign and the units are the shared formatter's
 const money = (v: number | null | undefined): string => {
   if (v === null || v === undefined) return '';
   if (v === 0) return '—';
-  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  return `$${Math.round(v / 1000)}K`;
+  return formatMoney(v);
 };
 
 const TIP_COMMITTED =
@@ -62,6 +78,41 @@ const TIP_COMMITTED =
   'including money still owed to players who were traded or released. It is NOT a payroll ' +
   'projection: arbitration raises and yet-to-be-signed players are not in it, which is why ' +
   'future seasons look so light.';
+const TIP_NEXT_PAYROLL =
+  'OOTP’s own estimate for next season. It will not match the committed figure for next year ' +
+  'in the chart below, which counts only contracts already signed.';
+
+/** What each term of the reconciliation line is, said where the number is. */
+function reconcileTip(t: ReconcileTerm): string {
+  switch (t.key) {
+    case 'payroll':
+      return 'OOTP’s own payroll figure for this season, the same number as the Payroll now card.';
+    case 'deadMoney':
+      return (
+        `Salary still owed to ${plural(t.players ?? 0, 'player')} who left the club, listed below. ` +
+        'OOTP’s payroll figure does not include it.'
+      );
+    case 'minors':
+      return (
+        `Players on major-league minimum contracts who are playing in the minors: ${t.players ?? 0}. ` +
+        `The committed total counts their ${money(t.salary)} in full; OOTP’s payroll counts them at ` +
+        `the minor-league wage, so ${money(t.amount)} of it is not in that figure.`
+      );
+    default:
+      return (
+        'Contracts in the committed total that OOTP’s payroll figure leaves out. OOTP does not say ' +
+        'how it builds that figure, so this is the remainder rather than an itemised amount.'
+      );
+  }
+}
+
+const RECONCILE_LABEL: Record<ReconcileTerm['key'], string> = {
+  payroll: 'payroll now',
+  deadMoney: 'dead money',
+  minors: 'players in the minors',
+  other: 'other contracts',
+};
+
 const TIP_HEADROOM =
   'Budget minus committed salary. OOTP never publishes a future budget — the owner does not set ' +
   'one until the offseason — so seasons after this one assume today\'s budget holds flat unless ' +
@@ -123,7 +174,7 @@ export function Payroll({ orgId }: { orgId: number }) {
           <div className="finance-card">
             <span className="muted">Payroll next season</span>
             <strong>{money(f.payrollNextSeason)}</strong>
-            <span className="muted">OOTP estimate</span>
+            <span className="muted"><Tip label={'OOTP’s estimate'} tip={TIP_NEXT_PAYROLL} /></span>
           </div>
           <div className="finance-card">
             <span className="muted">Revenue / expenses</span>
@@ -134,6 +185,20 @@ export function Payroll({ orgId }: { orgId: number }) {
             <span className="muted">Cash for trades</span>
             <strong>{money(f.cashTradesAvailable)}</strong>
           </div>
+          {/* The payroll card and the committed chart are different sums; this is
+              the difference, so the two do not have to be reconciled by eye */}
+          {data.reconciliation && (
+            <p className="muted hint-line" style={{ gridColumn: '1 / -1', margin: 0 }}>
+              <strong>Committed {data.reconciliation.year} {money(data.reconciliation.committed)}</strong>
+              {' ='}
+              {data.reconciliation.terms.map((t, i) => (
+                <span key={t.key}>
+                  {' '}{i > 0 && (t.amount < 0 ? '− ' : '+ ')}
+                  <Tip label={`${RECONCILE_LABEL[t.key]} ${money(Math.abs(t.amount))}`} tip={reconcileTip(t)} />
+                </span>
+              ))}
+            </p>
+          )}
         </div>
       )}
 
@@ -301,7 +366,8 @@ export function Payroll({ orgId }: { orgId: number }) {
               <tr key={p.player_id} className={p.deadMoney ? 'row-dead' : ''}>
                 <td className="name">
                   <PlayerLink id={p.player_id}>{p.name}</PlayerLink>
-                  {p.deadMoney && <span className="role-tag">DEAD</span>}
+                  {/* A space, so a text reader gets "Edwin Díaz DEAD" and not "Edwin DíazDEAD" */}
+                  {p.deadMoney && <>{' '}<span className="role-tag">DEAD</span></>}
                 </td>
                 <td>{p.positionName}</td>
                 <td className="num">{p.age}</td>

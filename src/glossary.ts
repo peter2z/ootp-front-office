@@ -22,7 +22,7 @@ const EXTRA: Record<string, string> = {
   Lvl: 'The level the stat line was compiled at. Numbers from different levels are not directly comparable — a .900 OPS in A-ball is a far weaker signal than the same mark in the majors.',
   Player: 'Click any name to open the full player card: ratings, contract, career history, game logs, and injuries.',
   Pitcher: 'Click the name to open the full player card, including his pitch arsenal and velocity.',
-  Svc: 'Major-league service years. Six years of service normally brings free agency, and three brings arbitration — the two dates that shape every contract decision.',
+  Svc: 'Major-league service, written years.days: 11.027 is 11 years and 27 days, and a service year is 172 days. Six years normally brings free agency, and three brings arbitration — the two dates that shape every contract decision.',
 
   // ── Scouting ───────────────────────────────────────────────────────────
   Stam: "Stamina, on the 1-100 rating scale. It governs how deep a starter can go before tiring and whether a reliever can handle more than one inning.",
@@ -47,7 +47,7 @@ const EXTRA: Record<string, string> = {
   Shape: "The salary curve across the life of the deal. A rising line is a backloaded contract; a falling one is frontloaded. Hard to see in a row of numbers, obvious as a shape.",
 
   // ── Bullpen availability ───────────────────────────────────────────────
-  App: 'Appearances in the last three days — today, yesterday, and the day before.',
+  App: "Appearances in the three days before tonight's game.",
   'P/3d': 'Pitches thrown across the last three days. This is what actually decides whether an arm is available tonight, no matter how good the season line looks.',
   'Availability tonight': 'Whether this reliever can realistically be used in the next game, based on his recent pitch counts and consecutive appearances rather than on his season stats.',
 
@@ -77,8 +77,8 @@ const EXTRA: Record<string, string> = {
 
   // ── Staff ──────────────────────────────────────────────────────────────
   Manager: 'The person in the role. Coach ratings feed player development and in-game decisions.',
-  'Teach Hitting': "The coach's ability to develop hitters, on the 1-100 scale. It compounds over a full season of instruction.",
-  'Teach Pitching': "The coach's ability to develop pitchers, on the 1-100 scale.",
+  'Teach Hitting': "The coach's ability to develop hitters, on OOTP's 1-200 coach scale. It compounds over a full season of instruction.",
+  'Teach Pitching': "The coach's ability to develop pitchers, on OOTP's 1-200 coach scale.",
   'Handle Rookies': 'How well the coach develops young and inexperienced players specifically.',
 
   Rk: 'Rank within this list.',

@@ -63,7 +63,11 @@ export function blockedIds(): Set<number> {
 }
 
 /**
- * Season lines for a set of players, each read at the level he is playing at.
+ * Season lines for a set of players, each read at the level he is playing at,
+ * against that level's league and in the park of the club he did most of his
+ * work for there: the reading the trade desk gives its lines. These used to be
+ * read with no park at all, so a season in a hitters' park passed for a better
+ * one on the block than it did at the desk.
  *
  * Scoped deliberately. Adding a man's Triple-A line to his major-league one
  * produces a season nobody had, and then scaling the total against the
@@ -85,47 +89,70 @@ function linesFor(players: Array<{ player_id: number; level: number; league_id: 
   const holes = ids.map(() => '?').join(',');
   const wanted = new Map(players.map((p) => [p.player_id, p]));
 
+  /*
+   * A man's rows at his own level, one per club, folded into a single line,
+   * with the club he did most of his work for as the park it is read in. The
+   * work is outs for a pitcher and plate appearances for a hitter.
+   */
+  const atOwnLevel = (rows: Array<Record<string, number>>, pitchers: boolean, work: 'outs' | 'pa') => {
+    const folded = new Map<number, { total: Record<string, number>; park: number; most: number }>();
+    for (const row of rows) {
+      const p = wanted.get(row.player_id);
+      if (!p || (p.position === 1) !== pitchers || row.level_id !== p.level) continue;
+      const seen = folded.get(row.player_id) ?? { total: {}, park: row.team_id, most: -1 };
+      for (const [k, v] of Object.entries(row)) {
+        if (typeof v === 'number' && k !== 'player_id' && k !== 'level_id' && k !== 'team_id') {
+          seen.total[k] = (seen.total[k] ?? 0) + v;
+        }
+      }
+      if ((row[work] ?? 0) > seen.most) {
+        seen.most = row[work] ?? 0;
+        seen.park = row.team_id;
+      }
+      folded.set(row.player_id, seen);
+    }
+    return folded;
+  };
+
   if (tableExists('players_career_pitching_stats')) {
     const rows = db
       .prepare(
-        `SELECT player_id, level_id, SUM(outs) AS outs, SUM(er) AS er, SUM(ha) AS ha,
+        `SELECT player_id, level_id, team_id, SUM(outs) AS outs, SUM(er) AS er, SUM(ha) AS ha,
                 SUM(bb) AS bb, SUM(k) AS k, SUM(hra) AS hra, SUM(hp) AS hp, SUM(bf) AS bf,
                 SUM(g) AS g, SUM(gs) AS gs, SUM(w) AS w, SUM(l) AS l, SUM(s) AS sv,
                 SUM(hld) AS hld, SUM(war) AS war
          FROM players_career_pitching_stats
          WHERE year = ? AND split_id = 1 AND league_id != 0 AND player_id IN (${holes})
-         GROUP BY player_id, level_id`
+         GROUP BY player_id, level_id, team_id`
       )
       .all(year, ...ids) as Array<Record<string, number>>;
-    for (const row of rows) {
-      const p = wanted.get(row.player_id);
-      if (!p || p.position !== 1 || row.level_id !== p.level) continue;
-      const s = computePitching(row, leagueBaseline(p.league_id, year, p.level), null);
-      out.set(row.player_id, `${s.ip ?? 0} IP, ${(s.era ?? 0).toFixed(2)} ERA${s.eraPlus !== null ? `, ${s.eraPlus} ERA+` : ''}`);
+    for (const [id, { total, park }] of atOwnLevel(rows, true, 'outs')) {
+      const p = wanted.get(id)!;
+      const s = computePitching(total, leagueBaseline(p.league_id, year, p.level), park);
+      out.set(id, `${s.ip ?? 0} IP, ${(s.era ?? 0).toFixed(2)} ERA${s.eraPlus !== null ? `, ${s.eraPlus} ERA+` : ''}`);
     }
   }
 
   if (tableExists('players_career_batting_stats')) {
     const rows = db
       .prepare(
-        `SELECT player_id, level_id, SUM(pa) AS pa, SUM(ab) AS ab, SUM(h) AS h, SUM(d) AS d,
-                SUM(t) AS t3, SUM(hr) AS hr, SUM(bb) AS bb, SUM(ibb) AS ibb, SUM(hp) AS hp,
-                SUM(sf) AS sf, SUM(k) AS k, SUM(r) AS r, SUM(rbi) AS rbi, SUM(sb) AS sb,
-                SUM(cs) AS cs, SUM(war) AS war
+        `SELECT player_id, level_id, team_id, SUM(pa) AS pa, SUM(ab) AS ab, SUM(h) AS h,
+                SUM(d) AS d, SUM(t) AS t3, SUM(hr) AS hr, SUM(bb) AS bb, SUM(ibb) AS ibb,
+                SUM(hp) AS hp, SUM(sf) AS sf, SUM(k) AS k, SUM(r) AS r, SUM(rbi) AS rbi,
+                SUM(sb) AS sb, SUM(cs) AS cs, SUM(war) AS war
          FROM players_career_batting_stats
          WHERE year = ? AND split_id = 1 AND league_id != 0 AND player_id IN (${holes})
-         GROUP BY player_id, level_id`
+         GROUP BY player_id, level_id, team_id`
       )
       .all(year, ...ids) as Array<Record<string, number>>;
-    for (const row of rows) {
-      const p = wanted.get(row.player_id);
-      if (!p || p.position === 1 || row.level_id !== p.level) continue;
-      const s = computeBatting(row, leagueBaseline(p.league_id, year, p.level), null);
-      const three = (v: number | null | undefined) =>
-        v == null ? '—' : v.toFixed(3).replace(/^0\./, '.');
+    const three = (v: number | null | undefined) =>
+      v == null ? '—' : v.toFixed(3).replace(/^0\./, '.');
+    for (const [id, { total, park }] of atOwnLevel(rows, false, 'pa')) {
+      const p = wanted.get(id)!;
+      const s = computeBatting(total, leagueBaseline(p.league_id, year, p.level), park);
       out.set(
-        row.player_id,
-        `${row.pa ?? 0} PA, ${three(s.avg as number)}/${three(s.obp as number)}/${three(s.slg as number)}` +
+        id,
+        `${total.pa ?? 0} PA, ${three(s.avg as number)}/${three(s.obp as number)}/${three(s.slg as number)}` +
         `${s.wrcPlus !== null ? `, ${s.wrcPlus} wRC+` : ''}`
       );
     }

@@ -184,9 +184,10 @@ export function calendarBriefing(leagueId: number): string {
   const today = currentGameDate(leagueId);
   const said = entries.map((e) => {
     if (e.daysAway === null) return `${e.what} ${e.date}`;
-    if (e.passed) return `${e.what} ${e.date} (${Math.abs(e.daysAway)} days ago)`;
+    const days = (n: number) => `${n} ${n === 1 ? 'day' : 'days'}`;
+    if (e.passed) return `${e.what} ${e.date} (${days(Math.abs(e.daysAway))} ago)`;
     if (e.daysAway === 0) return `${e.what} ${e.date} (today)`;
-    return `${e.what} ${e.date} (in ${e.daysAway} days)`;
+    return `${e.what} ${e.date} (in ${days(e.daysAway)})`;
   });
   return (
     `KEY DATES — today is ${today ?? 'unknown'}. ${said.join('; ')}. ` +
@@ -335,9 +336,23 @@ export function ratingScaleMax(): number {
       // A save without that column simply contributes nothing
     }
   }
-  // Snap to the scale OOTP actually offers; nobody tops out at exactly the
-  // maximum on a small scale, so the bands are generous at the bottom
-  const known = [5, 8, 10, 20, 80];
+  // Nothing imported yet: answer the common case and remember nothing, so a
+  // call made before the first import cannot pin an empty database's "1-5"
+  // on the league that arrives a moment later
+  if (observed === 0) return 80;
+  /*
+   * Snap to the scale OOTP actually offers; nobody tops out at exactly the
+   * maximum on a small scale, so the bands are generous at the bottom.
+   *
+   * Everything above 20 reads as 20-80, on purpose. A 20-80 save is not
+   * capped at 80 in the export: the Dodgers save this was built against has
+   * contact, stuff and range ratings of 85, and listing 100 as a scale made
+   * that save read as 1-100 and every converted threshold a quarter too
+   * high. A genuine 1-100 save reads as 80 too, which is close enough to be
+   * safe: both scales put an average man at 50, so a cut-off written for
+   * 20-80 lands where it should on 1-100 without conversion.
+   */
+  const known = [5, 8, 10, 20];
   scaleCache = known.find((max) => observed <= max) ?? 80;
   return scaleCache;
 }
@@ -345,6 +360,43 @@ export function ratingScaleMax(): number {
 /** Called after an import, since a new save may use a different scale. */
 export function clearScaleCache(): void {
   scaleCache = null;
+}
+
+/**
+ * A cut-off chosen on the 20-80 scale, stated on the scale this save uses.
+ *
+ * OOTP lets the user pick 20-80, 1-100, 1-20, 1-10, 2-8 or 1-5, and nothing in
+ * the export says which, so the app reads the top of the scale off the data
+ * (ratingScaleMax, above). Every threshold the server applies to a rating — a
+ * ceiling of 55, a gap of 15, an average glove of 50 — was chosen on 20-80 and
+ * meant nothing anywhere else: on the 1-to-5 scale a 55 can never be reached
+ * and a gap of 15 can never be seen, so the advice did not fail loudly, it
+ * came out quietly wrong.
+ *
+ * A cut-off is therefore written once, as the 20-80 number it always was, and
+ * passed through here. The conversion is proportional, which is how the bars
+ * already draw a grade — the same share of the top of the scale whichever scale
+ * shows it — so it serves for a gap as well as for a level: 15 is 15 on 20-80
+ * and a little under 1 on 1-5. On 20-80 itself it returns what it was given,
+ * which is what keeps every existing save exactly as it was.
+ *
+ * It is a plain number and not a whole grade. A 1-to-5 save has no 3.4375, but
+ * a rating set against one is simply above it or not, and rounding the cut-off
+ * first would move it by up to half a grade.
+ *
+ * Proportional is exact for 20-80 and 2-8, which are one scale at a tenth the
+ * size, and close on 1-5. On 1-10 and 1-20, which start at one rather than a
+ * quarter of the way up, it runs high for a level — an average 50 comes out at
+ * 6.25 and 12.5 where the middle of the scale is 5.5 and 10.5 — and low for a
+ * gap. That is within what these cut-offs can bear, and this is the one place
+ * to refine if it ever is not.
+ *
+ * ratingScaleMax reads a 1-100 save as 20-80 on purpose (see the note there), so
+ * there this is the identity, which is what every threshold did before the
+ * helper existed and is about right, since both scales centre on 50.
+ */
+export function scaleGrade(valueOn80: number): number {
+  return (valueOn80 * ratingScaleMax()) / 80;
 }
 
 export function currentGameDate(leagueId: number): string | null {
