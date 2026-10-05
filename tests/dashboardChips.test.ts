@@ -1,11 +1,16 @@
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it, beforeAll, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from '../server/db.js';
-import { farmSignalCounts } from '../server/dashboard.js';
+import { PLAN_DECISION_KINDS, farmSignalCounts, planHorizonFold } from '../server/dashboard.js';
+import { historyDb } from '../server/history.js';
+import type { Plan } from '../server/planTypes.js';
 import { rosterCrunch } from '../server/rosterops.js';
 import { farmBreakdownTitle } from '../src/pages/Dashboard.js';
-import request from './request.js';
+import { DECISION_KINDS, defaultHorizon, kindCounts, readFilters, visibleMoves } from '../src/pages/Planner.js';
+import type { Plan as PagePlan } from '../src/api.js';
+import request, { post } from './request.js';
+import { PLAN, seedPlannerOrg } from './plannerFixture.js';
 import { IDS, SEASON } from './fixture.js';
 
 /**
@@ -26,6 +31,22 @@ import { IDS, SEASON } from './fixture.js';
  */
 
 const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+
+/**
+ * A planner that throws on demand, for the one test that needs the dashboard
+ * to meet a planner that cannot run. Everything else gets the real one.
+ */
+const plannerDown = vi.hoisted(() => ({ on: false }));
+vi.mock('../server/planner.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../server/planner.js')>();
+  return {
+    ...real,
+    computePlan: (...args: Parameters<typeof real.computePlan>) => {
+      if (plannerDown.on) throw new Error('the planner is down for this test');
+      return real.computePlan(...args);
+    },
+  };
+});
 
 interface Pending {
   crunchIssues: number;
@@ -301,5 +322,94 @@ describe('the dashboard page', () => {
     // the roster chip counts the whole "needs attention" list, so it carries nothing
     expect(page).toMatch(/label="Farm signals"[\s\S]*?onNavigate\('prospects', \{ signal: 'decision' \}\)/);
     expect(page).toMatch(/label="Roster issues"[^\n]*onNavigate\('crunch'\)/);
+  });
+});
+
+/**
+ * The "Org moves" chip counts what the Org Planner lists when it opens: the
+ * open moves of the decision kinds, folded to the horizon the page opens on.
+ * Asked of the planner fixture's whole organisation, with one move of each
+ * state the overlay knows, so a count that forgot the decisions or the fold
+ * would come out different.
+ */
+describe('the Org moves chip', () => {
+  const planOf = async (show = 'open'): Promise<Plan> =>
+    (await request(`/api/plan/${PLAN.org}?show=${show}`)) as Plan;
+  const chip = async (): Promise<{ planMoves?: number; planBreakdown?: Record<string, number> }> =>
+    ((await request(`/api/dashboard/${PLAN.org}`)).pending ?? {});
+
+  /**
+   * What the page lists when the chip opens it: the one payload the page
+   * fetches, through the page's own filters, on the address the chip builds.
+   * Its Decisions button and its table must say the same.
+   */
+  const page = async (): Promise<number> => {
+    const plan = (await request(`/api/plan/${PLAN.org}?show=all`)) as PagePlan;
+    const view = visibleMoves(plan, readFilters({ kind: 'decision' }, plan.gameDate, plan.levels.map((l) => l.rung)));
+    expect(kindCounts(view.beforeKind).decision).toBe(view.moves.length);
+    return view.moves.length;
+  };
+
+  beforeAll(async () => {
+    seedPlannerOrg();
+    historyDb.prepare(`DELETE FROM plan_decisions WHERE org_id = ?`).run(PLAN.org);
+  });
+
+  it('counts the same kinds and opens on the same horizon as the page', () => {
+    expect([...PLAN_DECISION_KINDS]).toEqual([...DECISION_KINDS]);
+    for (const date of ['2030-3-1', '2030-6-1', '2030-7-31', '2030-8-1', '2030-11-15']) {
+      expect(planHorizonFold(date), date).toBe(defaultHorizon(date));
+    }
+  });
+
+  it('equals the open decision moves of the plan under the default horizon fold', async () => {
+    const expected = (p: Plan): number => {
+      const fold = defaultHorizon(p.gameDate);
+      return p.moves.filter((m) =>
+        DECISION_KINDS.includes(m.kind) &&
+        (fold === 'all' || m.horizon === 'now') &&
+        m.decision.state === 'open'
+      ).length;
+    };
+    const before = await planOf();
+    const counted = expected(before);
+    // Something to count, or the equality below proves nothing
+    expect(counted).toBeGreaterThan(0);
+    expect((await chip()).planMoves).toBe(counted);
+    expect(await page()).toBe(counted);
+
+    // One decided either way: both leave the chip, and the count still matches the page
+    const fold = defaultHorizon(before.gameDate);
+    const countable = before.moves.filter((m) =>
+      DECISION_KINDS.includes(m.kind) && (fold === 'all' || m.horizon === 'now'));
+    expect(countable.length).toBeGreaterThanOrEqual(2);
+    try {
+      await post(`/api/plan/${PLAN.org}/decisions`, { moveKey: countable[0].key, decision: 'accepted' });
+      await post(`/api/plan/${PLAN.org}/decisions`, { moveKey: countable[1].key, decision: 'dismissed' });
+      const after = await planOf();
+      expect(expected(after)).toBe(counted - 2);
+      const p = await chip();
+      expect(p.planMoves).toBe(counted - 2);
+      expect(Object.values(p.planBreakdown ?? {}).reduce((a, b) => a + b, 0)).toBe(counted - 2);
+      // The accepted move has left the page's Open view as it left the chip:
+      // it waits under Accepted until an import sees it done
+      expect(await page()).toBe(counted - 2);
+    } finally {
+      historyDb.prepare(`DELETE FROM plan_decisions WHERE org_id = ?`).run(PLAN.org);
+    }
+  });
+
+  it('is null, not 0, when the planner could not run, and the report still comes', async () => {
+    plannerDown.on = true;
+    try {
+      const res = await request(`/api/dashboard/${PLAN.org}`);
+      expect(res.pending.planMoves).toBeNull();
+      expect(res.pending.planBreakdown).toBeNull();
+      // The rest of the morning report is not lost with it
+      expect(typeof res.pending.crunchIssues).toBe('number');
+    } finally {
+      plannerDown.on = false;
+    }
+    expect(typeof (await chip()).planMoves).toBe('number');
   });
 });

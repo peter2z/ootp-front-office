@@ -109,7 +109,11 @@ export function gloves(playerId: number): Gloves | null {
   for (let position = 1; position <= 9; position++) {
     const current = num(row, `fielding_rating_pos${position}`);
     const potential = num(row, `fielding_rating_pos${position}_pot`);
-    const experience = num(row, `fielding_experience${position - 1}`);
+    // The experience counters are indexed by position number, not zero-based:
+    // a catcher's games are in fielding_experience2 and a shortstop's in
+    // fielding_experience6. Reading `position - 1` handed every man the games
+    // of the position to his left, so a shortstop showed his third-base count.
+    const experience = num(row, `fielding_experience${position}`);
     // The dash in OOTP. Everything behind it stays behind it
     if (current <= 0) continue;
     positions.push({

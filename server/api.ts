@@ -43,6 +43,9 @@ import { scheduleRoutes } from './schedule.js';
 import { payrollRoutes } from './payroll.js';
 import { trendsRoutes } from './trends.js';
 import { chatRoutes } from './chat.js';
+import { clearPlanCache, plannerRoutes, verifyPlanDecisions } from './planner.js';
+import { planLeagueSave, planSaveSwitchPending, setPlanLeagueSave } from './plandecisions.js';
+import { currentSaveName } from './history.js';
 
 /*
  * Where the local model server is, handed to the provider layer once. It reads
@@ -79,6 +82,25 @@ api.use(recapRoutes);
 api.use(transactionRoutes);
 api.use(playerTrendRoutes);
 api.use(newspaperRoutes);
+/*
+ * Between choosing another save and the end of its import, league.db still
+ * holds the old save, so any plan the server can draw is the old save's. A
+ * decision made on it would be written under the new save's name against a
+ * move of the old one; the store refuses, and this says why in a sentence
+ * the page can show instead of a server error.
+ */
+const refuseDuringSaveSwitch = (req: Request, res: Response, next: NextFunction): void => {
+  // Reading the decisions is harmless; accepting, dismissing and reopening are not
+  const why = req.method === 'POST' || req.method === 'DELETE' ? planSaveSwitchPending() : null;
+  if (why) {
+    res.status(409).json({ ok: false, error: why });
+    return;
+  }
+  next();
+};
+// Middleware rather than a second route on the same paths, which the router test forbids
+api.use('/plan/:orgId/decisions', refuseDuringSaveSwitch);
+api.use(plannerRoutes);
 
 const META_PATH = path.join(DATA_DIR, 'last-import.json');
 
@@ -97,6 +119,12 @@ export const importState: {
   /** Where the running import has got to, so the page can show a bar. */
   progress: ImportProgress | null;
 } = { importing: false, lastImport: loadImportMeta(), lastError: null, progress: null };
+
+/*
+ * Which save league.db holds, as the last import recorded it. An import made
+ * before the record was kept says nothing, and the config is believed.
+ */
+setPlanLeagueSave(importState.lastImport?.saveName ?? null);
 
 /**
  * Kicks off the storylines and the briefing after an import, when the club has
@@ -163,6 +191,7 @@ function clearImportCaches(): void {
   clearScoutingCache(); // the peer groups a scouting rank is taken against
   clearBattedBallCache(); // contact buckets and the league average
   clearOrgCache(); // which grade columns the farm pages read
+  clearPlanCache(); // the organisation plan, its rung baselines and steps
 }
 
 export async function runImport(csvDir: string): Promise<void> {
@@ -170,18 +199,34 @@ export async function runImport(csvDir: string): Promise<void> {
   importState.importing = true;
   importState.lastError = null;
   importState.progress = null;
+  // The save this folder belongs to, fixed now: the config may change while the import runs
+  const save = currentSaveName();
   try {
-    importState.lastImport = await importCsvDir(csvDir, (p) => {
+    const result = await importCsvDir(csvDir, (p) => {
       importState.progress = p;
     });
+    importState.lastImport = { ...result, saveName: save };
     // Whatever was waiting on disk has now been read
     clearPendingExport();
     fs.writeFileSync(META_PATH, JSON.stringify(importState.lastImport));
+    // league.db is now this save's, so its plan can be drawn and decided on
+    setPlanLeagueSave(save);
     clearImportCaches();
     try {
       takeSnapshot(); // development-tracking snapshot, keyed by in-game date
     } catch (err) {
       console.error('[history] snapshot failed:', err);
+    }
+    /*
+     * Whether the moves the user accepted on the Org Planner happened, read
+     * off the league that just arrived. After the snapshot, so the two agree
+     * on the game date; in its own guard, so a store problem cannot take the
+     * import down with it.
+     */
+    try {
+      verifyPlanDecisions();
+    } catch (err) {
+      console.error('[planner] verifying decisions failed:', err);
     }
     console.log(
       `[import] ${importState.lastImport.tables} tables, ${importState.lastImport.rows} rows imported`
@@ -295,7 +340,14 @@ api.get('/status', (_req, res) => {
 api.post('/config', (req, res) => {
   const { csvDir, saveName } = req.body as { csvDir?: string; saveName?: string };
   if (!csvDir) return res.status(400).json({ error: 'csvDir is required' });
+  /*
+   * Pin the save league.db holds before the config names another, then drop
+   * the old save's plan. Nothing is decided, retired or verified against the
+   * planner until the new save's import has finished and its plan is drawn.
+   */
+  setPlanLeagueSave(planLeagueSave());
   saveConfig({ csvDir, saveName: saveName ?? null });
+  if (currentSaveName() !== planLeagueSave()) clearPlanCache();
   if (fs.existsSync(csvDir)) {
     importState.importing = true; // visible to /status before the import starts
     setImmediate(() => {

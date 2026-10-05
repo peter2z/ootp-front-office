@@ -8,9 +8,12 @@ import { clearValuationCaches } from '../server/valuation.js';
 import { clearTradeCache } from '../server/trade.js';
 import { clearScoutingCache, scoutingReport } from '../server/playerfile.js';
 import { clearBattedBallCache, contactLeague, contactProfiles } from '../server/battedball.js';
-import { clearOrgCache } from '../server/org.js';
-import request from './request.js';
+import { clearOrgCache, latestStatsYear } from '../server/org.js';
+import { clearPlanCache } from '../server/planner.js';
+import { setPlanLeagueSave } from '../server/plandecisions.js';
+import request, { post } from './request.js';
 import { IDS } from './fixture.js';
+import { PLAN, PLAN_MEN, seedPlannerOrg } from './plannerFixture.js';
 
 /**
  * What the server remembers must not outlive the league it was learned from.
@@ -56,6 +59,7 @@ const clearEverything = (): void => {
   clearScoutingCache();
   clearBattedBallCache();
   clearOrgCache();
+  clearPlanCache();
 };
 
 /**
@@ -286,6 +290,95 @@ describe('the grade the farm pages read', () => {
   });
 });
 
+describe('the latest season the stats tables carry', () => {
+  /*
+   * "This season" is MAX(year) over the career stats, and on a save without a
+   * year index that was a scan of the whole table each time it was asked — once
+   * per club by the planner. It is now read once and kept until the import
+   * resets the org cache, so a re-export that opens a new season has to drop it.
+   */
+  it('is read again once the import has reset it', () => {
+    arrange();
+    const before = latestStatsYear();
+    expect(before.batting, 'the fixture carries batting lines').not.toBeNull();
+    const next = Math.max(before.batting!, before.pitching ?? 0) + 1;
+    const add = db.prepare(
+      `INSERT INTO players_career_batting_stats (player_id, year, team_id, league_id, level_id, split_id, pa)
+       VALUES (?, ?, ?, ?, 1, 1, 1)`
+    );
+    try {
+      add.run(SUBJECT, next, IDS.otherMlbTeam, IDS.league);
+      expect(latestStatsYear(), 'the old answer was not remembered').toEqual(before);
+
+      clearOrgCache();
+      expect(latestStatsYear()).toEqual({ ...before, batting: next });
+    } finally {
+      db.prepare(`DELETE FROM players_career_batting_stats WHERE player_id = ? AND year = ?`).run(SUBJECT, next);
+      clearOrgCache();
+    }
+  });
+});
+
+describe('the organisation plan', () => {
+  /*
+   * The plan is the dearest thing the server works out, and it is kept whole
+   * until the next import: the moves, the rung baselines they were judged
+   * against and the OOTP steps. A plan drawn on the old export would go on
+   * naming a man for a forced move after a re-import in which he is no longer
+   * worth one, so the import has to drop it with the rest.
+   */
+  it('is drawn again once the import has reset it', async () => {
+    arrange();
+    seedPlannerOrg();
+    const before = await forcedMoves();
+    expect(before, 'the fixture org carries forced moves').toBeGreaterThan(0);
+
+    // The man a service cap sends two steps up is now rated far below the
+    // level that would take him, and a man like that is released instead
+    regradeDown(PLAN_MEN.dslTwoStepsFit);
+    clearValuationCaches();
+    expect(await forcedMoves(), 'the old plan was not remembered, so there is nothing for the reset to do').toBe(before);
+
+    clearPlanCache();
+    expect(await forcedMoves()).toBe(before - 1);
+  });
+
+  /*
+   * Choosing another save is not the end of an import but the start of one,
+   * and the plan held in memory is the old save's from that moment: it must
+   * not be served, decided on or retired against while the new save loads.
+   */
+  it('is dropped the moment another save is chosen, before its import has started', async () => {
+    const configPath = path.join(process.env.OOTP_FO_DATA_DIR!, 'config.json');
+    const savedConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : null;
+    try {
+      arrange();
+      seedPlannerOrg();
+      const before = await forcedMoves();
+      regradeDown(PLAN_MEN.dslTwoStepsFit);
+      clearValuationCaches();
+      expect(await forcedMoves(), 'the plan is held until something drops it').toBe(before);
+
+      // A folder that is not there yet: the save is chosen and nothing is imported
+      await post('/api/config', { csvDir: path.join(os.tmpdir(), 'ootp-fo-no-export-yet'), saveName: 'Another save' });
+      expect(await forcedMoves()).toBe(before - 1);
+    } finally {
+      if (savedConfig === null) fs.rmSync(configPath, { force: true });
+      else fs.writeFileSync(configPath, savedConfig);
+      setPlanLeagueSave(null);
+    }
+  });
+});
+
+/** How many moves the plan forces on the fixture org. */
+const forcedMoves = async (): Promise<number> => (await request(`/api/plan/${PLAN.org}`)).counts.forced;
+
+/** OOTP's export of a man who has fallen apart: a 20 now, a 30 at best. */
+const regradeDown = (id: number): void => {
+  db.prepare(`UPDATE players_value SET oa = 20, pot = 30, oa_rating = 20, pot_rating = 30, overall_value = 400, talent_value = 600 WHERE player_id = ?`)
+    .run(id);
+};
+
 describe('the league date in /status', () => {
   const dateNow = async (): Promise<string | null> => (await request('/api/status')).leagueDate;
 
@@ -335,9 +428,11 @@ describe('a re-import', () => {
     surplus: [] as string[],
     contactIsStrength: undefined as boolean | undefined,
     averageExitVelo: undefined as number | undefined,
-    expectedAverage: undefined as number | undefined,
+    expectedAverage: undefined as number | null | undefined,
     grade: 0,
     date: null as string | null,
+    forcedMoves: 0,
+    pitchingYear: null as number | null,
   };
 
   /** A table as OOTP's export writes it: a header row, then a line per row. */
@@ -355,6 +450,7 @@ describe('a re-import', () => {
 
   beforeAll(async () => {
     arrange();
+    seedPlannerOrg();
     dropExactGrades();
 
     // Read everything once, so every cache holds the old league's answer — as
@@ -365,15 +461,22 @@ describe('a re-import', () => {
     before.expectedAverage = expectedAverage();
     before.grade = await gradeOnChart();
     before.date = (await request('/api/status')).leagueDate;
+    before.forcedMoves = await forcedMoves();
+    before.pitchingYear = latestStatsYear().pitching;
 
     // The next day's export: stronger arms, harder contact, the exact grades
-    // present, and every other hitter in the league a good deal better than him
+    // present, every other hitter in the league a good deal better than him,
+    // and the man a cap sends two steps up now rated far below the level that would take him
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ootp-fo-reimport-'));
+    const fallen = PLAN_MEN.dslTwoStepsFit;
     exportTable('players_value', rowsOf('players_value').map((r) => ({
       ...r,
-      overall_value: PITCHERS.includes(r.player_id as number) ? STRONG : r.overall_value,
-      oa: r.player_id === IDS.injured ? 62 : r.oa_rating,
-      pot: r.player_id === IDS.injured ? 62 : r.pot_rating,
+      overall_value: PITCHERS.includes(r.player_id as number) ? STRONG : r.player_id === fallen ? 400 : r.overall_value,
+      talent_value: r.player_id === fallen ? 600 : r.talent_value,
+      oa_rating: r.player_id === fallen ? 20 : r.oa_rating,
+      pot_rating: r.player_id === fallen ? 30 : r.pot_rating,
+      oa: r.player_id === IDS.injured ? 62 : r.player_id === fallen ? 20 : r.oa_rating,
+      pot: r.player_id === IDS.injured ? 62 : r.player_id === fallen ? 30 : r.pot_rating,
     })));
     exportTable('players_batting', rowsOf('players_batting').map((r) => ({
       ...r,
@@ -385,6 +488,12 @@ describe('a re-import', () => {
       result: 4,
     })));
     exportTable('leagues', rowsOf('leagues').map((r) => ({ ...r, current_date: '2030-6-2' })));
+    // One pitching line in the season after, thrown by a man outside the planner's org
+    const pitching = rowsOf('players_career_pitching_stats');
+    exportTable('players_career_pitching_stats', [
+      ...pitching,
+      { ...pitching[0], player_id: SUBJECT, team_id: IDS.otherMlbTeam, year: before.pitchingYear! + 1 },
+    ]);
 
     await runImport(dir);
     expect(importState.lastError, 'the import itself failed').toBeNull();
@@ -419,5 +528,15 @@ describe('a re-import', () => {
   it('shows the new league date', async () => {
     expect(before.date).toBe('2030-06-01');
     expect((await request('/api/status')).leagueDate).toBe('2030-06-02');
+  });
+
+  it('reads the latest season again', () => {
+    expect(before.pitchingYear).not.toBeNull();
+    expect(latestStatsYear().pitching).toBe(before.pitchingYear! + 1);
+  });
+
+  it('draws the organisation plan again', async () => {
+    expect(before.forcedMoves).toBeGreaterThan(0);
+    expect(await forcedMoves()).toBe(before.forcedMoves - 1);
   });
 });

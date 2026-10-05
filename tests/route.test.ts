@@ -565,6 +565,10 @@ describe('the dashboard chips', () => {
     expect(dash).toMatch(/label="Farm signals"[\s\S]*?onNavigate\('prospects', \{ signal: 'decision' \}\)/);
     expect(dash).toMatch(/label="Expiring contracts"[\s\S]*?onNavigate\('contracts', \{ flag: 'expiring' \}\)/);
     expect(dash).toMatch(/label="Extension candidates"[\s\S]*?onNavigate\('contracts', \{ action: 'extension' \}\)/);
+    // The planner opens on every kind by itself; the chip counts the decision
+    // kinds, so it carries them, and the page's own horizon and Open filter
+    // are the chip's fold
+    expect(dash).toMatch(/label="Org moves"[\s\S]*?onNavigate\('planner', \{ kind: 'decision' \}\)/);
   });
 
   it('carry nothing where the page is the whole of the count', () => {
@@ -578,6 +582,7 @@ describe('the dashboard chips', () => {
     expect(buildHash('prospects', { signal: 'decision' })).toBe('#/prospects?signal=decision');
     expect(buildHash('contracts', { flag: 'expiring' })).toBe('#/contracts?flag=expiring');
     expect(buildHash('contracts', { action: 'extension' })).toBe('#/contracts?action=extension');
+    expect(buildHash('planner', { kind: 'decision' })).toBe('#/planner?kind=decision');
   });
 });
 

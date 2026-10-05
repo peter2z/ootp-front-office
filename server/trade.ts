@@ -38,8 +38,8 @@ const teamLabel = `CASE WHEN t.name = t.nickname THEN t.name ELSE t.name || ' ' 
  * good he is. Measured against everybody at once relievers sink, and anything
  * built on a raw sum inherits that.
  */
-type Group = 'pos' | 'sp' | 'rp';
-const groupOf = (position: number, role: number | null): Group =>
+export type Group = 'pos' | 'sp' | 'rp';
+export const groupOf = (position: number, role: number | null): Group =>
   position !== 1 ? 'pos' : role === ROLE_STARTER ? 'sp' : 'rp';
 
 /**
@@ -54,7 +54,7 @@ const groupOf = (position: number, role: number | null): Group =>
  * 1,119 for starters and 706 for relievers: a 34th-percentile shortstop clears
  * it by a little, and a teenager parked on the roster not at all.
  */
-const REPLACEMENT_PCT = 25;
+export const REPLACEMENT_PCT = 25;
 /** Under this share of the bigger side's surplus, a gap is noise rather than a verdict. */
 const EVEN_SHARE = 0.1;
 /** How far below the other side's best man a side's best can sit before depth is all it offers. */
@@ -104,7 +104,7 @@ let poolCache: Record<Group, number[]> | null = null;
  * this was built against — below the tenth percentile of real major-league
  * position players. Against that, two weak men at a position looked like depth.
  */
-function mlbPools(values: Map<number, PlayerValue>): Record<Group, number[]> {
+export function mlbPools(values: Map<number, PlayerValue>): Record<Group, number[]> {
   if (poolCache) return poolCache;
   const pools: Record<Group, number[]> = { pos: [], sp: [], rp: [] };
   if (tableExists('players_roster_status')) {
@@ -127,7 +127,7 @@ function mlbPools(values: Map<number, PlayerValue>): Record<Group, number[]> {
 }
 
 /** The value at a percentile of a sorted pool; nothing at all for an empty one. */
-const valueAt = (sorted: number[], pct: number): number =>
+export const valueAt = (sorted: number[], pct: number): number =>
   sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((pct / 100) * sorted.length))] : 0;
 
 /**

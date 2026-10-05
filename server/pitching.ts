@@ -3,15 +3,14 @@ import { db, tableExists } from './db.js';
 import { countsAsPitcherSql } from './twoway.js';
 import { healthOf, type Health } from './health.js';
 import { computePitching, leagueBaseline } from './stats.js';
-import { ON_ROSTER } from './valuation.js';
+import { ON_ROSTER, ROLE_CLOSER } from './valuation.js';
 import { DATE_KEY } from './dashboard.js';
 import { lastPlayedKey, leagueDateKey, projectedRotation, remainingGames } from './schedule.js';
 
 export const pitchingRoutes = Router();
 
-/** OOTP roles for pitchers. */
+/** OOTP's role code for a starting pitcher; the closer's comes from valuation.ts. */
 const ROLE_STARTER = 11;
-const ROLE_CLOSER = 13;
 
 const HAND: Record<number, string> = { 1: 'R', 2: 'L', 3: 'S' };
 

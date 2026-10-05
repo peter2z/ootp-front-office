@@ -566,3 +566,189 @@ export interface ExportProgress {
   total: number;
 }
 export const getExportProgress = () => apiGet<ExportProgress>('/api/export-site/progress');
+
+// ── The Organization Planner ────────────────────────────────────────────
+//
+// These mirror server/planTypes.ts field for field: the page is written
+// against the design's §7 JSON and the server builds the same shapes, and the
+// browser build must not reach into the server tree for a type.
+
+export type RungKey = 'mlb' | 'aaa' | 'aa' | 'high-a' | 'single-a' | 'complex' | 'dsl' | 'ic';
+export type MoveKind =
+  | 'forced' | 'callup' | 'senddown' | 'promote' | 'demote' | 'cover' | 'assign'
+  | 'position' | 'role' | 'protect' | 'il60' | 'trade' | 'release' | 'hold';
+export type Horizon = 'now' | 'offseason';
+export type DecisionState = 'open' | 'accepted' | 'dismissed';
+export type DecisionOutcome = 'done' | 'not-yet' | 'changed' | 'moot';
+export type Tone = 'ok' | 'warn' | 'bad';
+export type AssetClass = 'core' | 'prospect' | 'depth' | 'surplus';
+export type AssetModifier = 'on40-last-option' | 'on40-out-of-options' | 'rule5-exposed' | 'minor-fa-after-season';
+export type Readiness = 'ready' | 'hold' | 'overmatched' | 'frozen' | 'unscored';
+export type UtilityClass = 'C' | 'IF' | 'OF' | 'super' | 'bat-only' | 'everyday' | 'SP' | 'swing' | 'RP' | 'CL';
+export type StructureGroup = 'C' | 'IF' | 'OF' | 'SP' | 'RP' | 'SS cover' | 'CF cover';
+
+export interface MoveDecision {
+  state: DecisionState;
+  /** The game date the decision was made on; null while open. */
+  gameDate: string | null;
+  outcome: DecisionOutcome | null;
+  /** The game date of the export the outcome was read from. */
+  verifiedGameDate: string | null;
+  /**
+   * Where that export found him: a club's label, or 'out of the organization'
+   * for a release or trade seen through. Null until an import has looked, and
+   * while the outcome is not-yet.
+   */
+  seenAt: string | null;
+  /**
+   * The deadline the move was decided against, as it was stored with the
+   * decision. The card's own deadline can move on from it (OOTP rolls the
+   * Rule 5 date forward a year once the draft is held), so the page names
+   * this one when it says which deadline passed. Null while open, and for a
+   * move that had no deadline.
+   */
+  deadlineDate: string | null;
+}
+
+export interface PlanDeadline {
+  kind: string;
+  /** OOTP's unpadded form, as the export writes it (2028-9-10). */
+  date: string;
+  what: string;
+  /** Counted from the game date, so the plan is deterministic. */
+  daysAway: number;
+}
+
+export interface PlanMove {
+  /** `kind:player_id:from:to`, stable across imports while the recommendation is the same. */
+  key: string;
+  kind: MoveKind;
+  horizon: Horizon;
+  forced: boolean;
+  player: {
+    player_id: number; name: string; age: number; positionName: string; roleLabel: string | null;
+    oa: number | null; pot: number | null; bats: string | null; throws: string | null;
+    utility: UtilityClass | null; assetClass: AssetClass | null;
+  };
+  from: { rung: RungKey; label: string; team_id: number | null };
+  to: { rung: RungKey | 'out' | '40man'; label: string; team_id: number | null; position: number | null; role: string | null };
+  /** Sentences written on the server; the rule that fired is the first one. Never empty. */
+  reasons: string[];
+  screen: string;
+  ootpSteps: string[];
+  deadline: PlanDeadline | null;
+  verify: { field: string; expect: string | number | boolean } | null;
+  fortyMan: { count: number; limit: number; comesOff: { player_id: number; name: string; why: string } | null } | null;
+  linked: string[];
+  decision: MoveDecision;
+}
+
+export type GroupCounts = Record<'C' | 'IF' | 'OF' | 'SP' | 'RP', number>;
+
+export interface PlanStaffRow {
+  player_id: number;
+  name: string;
+  fit: number | null;
+  /** `CL` for the derived closer, `vs L` / `vs R` for a specialist, `swing` for a swing man in the rotation. */
+  tag: string | null;
+}
+
+export interface PlanRosterRow {
+  player_id: number; name: string; age: number; positionName: string; roleLabel: string | null;
+  oa: number | null; pot: number | null; fit: number | null; verdict: Readiness;
+  utility: UtilityClass | null; assetClass: AssetClass | null;
+  status: 'stays' | 'arrives' | 'leaves';
+  frozen: boolean;
+  /** The season he is last eligible at this rung under its cap, or null when uncapped. */
+  lastEligibleSeason: number | null;
+}
+
+export interface PlanLevel {
+  rung: RungKey;
+  /** 1 at the top; the page orders by it. */
+  rank: number;
+  label: string;
+  levelName: string;
+  teamIds: number[];
+  leagueId: number | null;
+  serviceCap: number | null;
+  now: { roster: number; healthy: number; il: number; groups: GroupCounts };
+  planned: { roster: number; healthy: number; groups: GroupCounts };
+  /** The size band from Settings: minimum hard, maximum soft. */
+  target: { min: number; max: number };
+  structure: Array<{ group: StructureGroup; have: number; need: number; tone: Tone; note?: string }>;
+  staff: { rotation: PlanStaffRow[]; bullpen: PlanStaffRow[] };
+  needs: string[];
+  baseline: { medAge: number | null; medOa: { pos: number | null; sp: number | null; rp: number | null } };
+  tone: Tone;
+  roster: PlanRosterRow[];
+  /**
+   * One row per club where a rung holds more than one (the two DSL clubs),
+   * each judged against the band one club answers to. Absent from a plan made
+   * before the engine sent them.
+   */
+  clubs?: PlanClub[];
+}
+
+/** One club of a rung that holds several, sized against the per-club band. */
+export interface PlanClub {
+  team_id: number;
+  label: string;
+  now: number;
+  planned: number;
+  min: number;
+  max: number;
+  tone: Tone;
+}
+
+export interface PlannerSettings {
+  targets: { fullSeason: { min: number; max: number }; complex: { min: number; max: number }; dsl: { min: number; max: number } };
+  /** By rung key; null means uncapped. */
+  serviceCaps: Record<string, number | null>;
+  icMaxAge: number;
+  icSize: number;
+}
+
+export type PlanCounts = Record<MoveKind, number> & {
+  offseason: number; open: number; accepted: number; dismissed: number; done: number;
+  /** Men the Rule 5 draft could take, counted as the 40-man page counts them. */
+  rule5Eligible: number;
+};
+
+export interface Plan {
+  orgId: number;
+  /** OOTP's unpadded form (2028-5-15). */
+  gameDate: string;
+  season: number;
+  settings: PlannerSettings;
+  warnings: string[];
+  org: {
+    fullSeasonNow: number; fullSeasonMin: number; fullSeasonMax: number;
+    fortyMan: { count: number; limit: number };
+    ic: { size: number; max: number; ages: Record<string, number> };
+    mlbThinnest: string[];
+  };
+  levels: PlanLevel[];
+  moves: PlanMove[];
+  releaseOrTrade: Array<{
+    player_id: number; name: string; assetClass: AssetClass; modifiers: AssetModifier[];
+    kind: 'trade' | 'release'; rank: number; reasons: string[];
+  }>;
+  leaving: Array<{ player_id: number; name: string; why: string }>;
+  deadlines: Array<{ date: string; what: string; player_id: number; name: string; moveKey: string | null }>;
+  counts: PlanCounts;
+  method: Record<string, unknown>;
+}
+
+/**
+ * One fetch for the whole plan. The page asks for `show=all` and filters
+ * client-side, so a static host that drops query strings serves the same plan
+ * the dev server does (the exporter crawls exactly this address).
+ */
+export const getPlan = (orgId: number) => json<Plan>(`/api/plan/${orgId}?show=all`);
+export const decidePlanMove = (orgId: number, moveKey: string, decision: 'accepted' | 'dismissed') =>
+  apiPost<{ ok: boolean; decision: MoveDecision }>(`/api/plan/${orgId}/decisions`, { moveKey, decision });
+export const reopenPlanMove = (orgId: number, moveKey: string) =>
+  apiDelete<{ ok: boolean }>(`/api/plan/${orgId}/decisions/${encodeURIComponent(moveKey)}`);
+export const putPlannerSettings = (patch: Partial<PlannerSettings>) =>
+  apiPut<{ ok: boolean; planner: PlannerSettings }>('/api/planner-settings', patch);

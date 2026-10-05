@@ -9,6 +9,8 @@ export interface ImportResult {
   startedAt: string;
   finishedAt: string;
   files: Array<{ table: string; rows: number }>;
+  /** The save the import was made for; set by runImport, absent in a record written before 0.42.0. */
+  saveName?: string | null;
 }
 
 /** Where the import has got to, for a page that would rather not look frozen. */
@@ -198,6 +200,25 @@ export async function importCsvDir(
   };
 }
 
+/** The tables whose league-season aggregates get a composite (league_id, year) index. */
+const LEAGUE_YEAR_TABLES = new Set(['players_career_batting_stats', 'players_career_pitching_stats']);
+
+/**
+ * Single columns indexed on one table only, where the column name is too
+ * common to index everywhere it appears.
+ *
+ * year      "this season" is MAX(year) over the career stats, read by the farm
+ *           pages, the season form and the planner; without it each read was a
+ *           scan of 700,000 batting lines or 390,000 pitching ones
+ * organization_id   the org's men, read by the roster pages, the 40-man and the
+ *           planner, each a scan of all 135,000 players in a real save
+ */
+const TABLE_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['players_career_batting_stats', 'year'],
+  ['players_career_pitching_stats', 'year'],
+  ['players', 'organization_id'],
+];
+
 /**
  * Indexes the columns every page actually filters on.
  *
@@ -209,37 +230,63 @@ export async function importCsvDir(
  * Columns are discovered rather than listed, because the importer is
  * deliberately schema-tolerant: OOTP adds and renames fields between versions,
  * and a hardcoded list would quietly stop covering new tables.
+ *
+ * Idempotent, and creates whatever is missing. It used to return as soon as
+ * any idx_ index existed, which left a database imported by an older version
+ * without every index added since — and, because an import replaces only the
+ * tables in the export, could leave a re-imported table bare beside indexed
+ * ones. Startup calls it on every launch; when everything is there the cost
+ * is a schema read per table and no writes.
+ *
+ * `analyze` says what to measure once something was made: 'all' (the import)
+ * runs ANALYZE over the whole database, as every import did; 'new' (startup)
+ * measures only the indexes just added unless there were none before, so an
+ * upgrade gains its indexes without a whole-database pass on launch.
  */
-export function buildIndexes(): void {
+export function buildIndexes(analyze: 'all' | 'new' = 'all'): void {
   const started = Date.now();
-  // Startup calls this on every launch; once the indexes exist there is nothing
-  // to do and the check costs a single query
-  const existing = (
-    db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'`)
-      .get() as { n: number }
-  ).n;
-  if (existing > 0) return;
+  const have = new Set(
+    (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as Array<{ name: string }>).map((i) => i.name)
+  );
+  const fresh = ![...have].some((n) => n.startsWith('idx_'));
   const tables = (
     db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>
   ).map((t) => t.name);
 
-  let made = 0;
+  const made: string[] = [];
+  const create = (table: string, name: string, columns: string[]): void => {
+    if (have.has(name)) return;
+    try {
+      db.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON "${table}" (${columns.map((c) => `"${c}"`).join(', ')})`);
+      have.add(name);
+      made.push(name);
+    } catch (err) {
+      // A malformed table should not fail the whole import
+      console.warn(`[import] index on ${table}(${columns.join(', ')}) failed:`, (err as Error).message);
+    }
+  };
   for (const table of tables) {
     const columns = new Set(
       (db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>).map((c) => c.name)
     );
     for (const column of ['player_id', 'team_id', 'game_id', 'league_id']) {
-      if (!columns.has(column)) continue;
-      try {
-        db.exec(`CREATE INDEX IF NOT EXISTS "idx_${table}_${column}" ON "${table}" ("${column}")`);
-        made += 1;
-      } catch (err) {
-        // A malformed table should not fail the whole import
-        console.warn(`[import] index on ${table}.${column} failed:`, (err as Error).message);
-      }
+      if (columns.has(column)) create(table, `idx_${table}_${column}`, [column]);
+    }
+    for (const [only, column] of TABLE_COLUMNS) {
+      if (only === table && columns.has(column)) create(table, `idx_${table}_${column}`, [column]);
+    }
+    // The league baselines sum one league-season at a time, and on the single
+    // column indexes above each of those sums still walked every row of the
+    // league — about 97 ms per league-season on a real save, which the
+    // planner pays twenty-odd times over. A composite index turns each one
+    // into a range scan.
+    if (LEAGUE_YEAR_TABLES.has(table) && columns.has('league_id') && columns.has('year')) {
+      create(table, `idx_${table}_league_year`, ['league_id', 'year']);
     }
   }
+  if (made.length === 0) return;
   // Lets SQLite pick between the indexes it now has rather than guessing
-  db.exec('ANALYZE');
-  console.log(`[import] ${made} indexes in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  if (analyze === 'all' || fresh) db.exec('ANALYZE');
+  else for (const name of made) db.exec(`ANALYZE "${name}"`);
+  console.log(`[import] ${made.length} indexes in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }

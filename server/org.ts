@@ -3,8 +3,15 @@ import { db, hasColumns, tableExists, tableColumns } from './db.js';
 import { LEVEL_NAMES, ratingScaleMax } from './valuation.js';
 import { seasonFormByPlayer, type SeasonForm } from './form.js';
 import { rosterCrunch } from './rosterops.js';
-import { SERVICE_DAYS_PER_YEAR } from './contracts.js';
 import { healthOf } from './health.js';
+import { OPTIONS_ALLOWED, optionState, outOfOptions, serviceYearsOf } from './rosterRules.js';
+
+/*
+ * The option rules live in rosterRules.ts now, read by this file, the 40-Man
+ * page and the planner alike; they are re-exported here so the player card
+ * and anything else that learned them from this module keeps working.
+ */
+export { OPTIONS_ALLOWED, outOfOptions, serviceYearsOf };
 
 export const orgRoutes = Router();
 
@@ -80,7 +87,7 @@ orgRoutes.get('/orgs', (_req, res) => {
 /** The column signings nobody has assigned yet are gathered under. */
 const UNASSIGNED_TEAM = -1;
 
-function orgTeams(orgId: number) {
+export function orgTeams(orgId: number) {
   return db
     .prepare(
       `SELECT team_id, name, nickname, level FROM teams
@@ -89,7 +96,7 @@ function orgTeams(orgId: number) {
     .all(orgId, orgId) as Array<{ team_id: number; name: string; nickname: string; level: number }>;
 }
 
-interface OrgPlayer {
+export interface OrgPlayer {
   player_id: number;
   team_id: number;
   first_name: string;
@@ -97,6 +104,16 @@ interface OrgPlayer {
   age: number;
   position: number;
   role: number;
+  /**
+   * Hands, birth date and the league he is listed under, for the planner. Each
+   * is null on a save whose export lacks the column, and the pages that do not
+   * need them never read them.
+   */
+  bats: number | null;
+  throws: number | null;
+  date_of_birth: string | null;
+  /** Negative for a man in the international complex, who belongs to no club. */
+  league_id: number | null;
   /** 0 when the save has him on no roster — signed, not yet assigned. */
   rostered: number;
   con: number | null; gap: number | null; pow: number | null; eye: number | null; avk: number | null;
@@ -130,16 +147,43 @@ function gradeColumns(): { oa: string; pot: string } {
   return gradeColumnChoice;
 }
 
+/** The latest season in each career stats table, once per import; see {@link latestStatsYear}. */
+let statsYears: { batting: number | null; pitching: number | null } | null = null;
+
+/**
+ * The latest season with a line in each career stats table, null for a table
+ * that is missing or empty.
+ *
+ * "This season" is read this way by the farm pages, the season form and the
+ * planner, and on a save imported before the year indexes existed every read
+ * was a scan of the whole table — 700,000 batting lines and 390,000 pitching
+ * ones, about 155 ms each — paid once per club by the planner and the
+ * contracts page. The answer only changes when an import replaces the
+ * tables, so it is kept until clearOrgCache() runs after one.
+ */
+export function latestStatsYear(): { batting: number | null; pitching: number | null } {
+  if (statsYears) return statsYears;
+  const max = (t: string): number | null =>
+    tableExists(t) ? (db.prepare(`SELECT MAX(year) AS y FROM "${t}"`).get() as { y: number | null }).y : null;
+  statsYears = { batting: max('players_career_batting_stats'), pitching: max('players_career_pitching_stats') };
+  return statsYears;
+}
+
 /** Called after an import, since a different save may carry different columns. */
 export function clearOrgCache(): void {
   gradeColumnChoice = null;
+  statsYears = null;
 }
 
-function orgPlayers(orgId: number): OrgPlayer[] {
+export function orgPlayers(orgId: number): OrgPlayer[] {
   const grade = gradeColumns();
+  // Each guarded on its own: an older export may carry the hands and not the birth date
+  const optional = ['bats', 'throws', 'date_of_birth', 'league_id']
+    .map((c) => (hasColumns('players', c) ? `p.${c}` : `NULL AS ${c}`));
   return db
     .prepare(
       `SELECT p.player_id, p.team_id, p.first_name, p.last_name, p.age, p.position, p.role,
+              ${optional.join(', ')},
               b.batting_ratings_overall_contact AS con, b.batting_ratings_overall_gap AS gap,
               b.batting_ratings_overall_power AS pow, b.batting_ratings_overall_eye AS eye,
               b.batting_ratings_overall_strikeouts AS avk,
@@ -188,7 +232,7 @@ function orgPlayers(orgId: number): OrgPlayer[] {
  * The old average survives only as a fallback for an export without
  * players_value, where something is better than an empty column.
  */
-function composites(p: OrgPlayer): { cur: number | null; pot: number | null } {
+export function composites(p: OrgPlayer): { cur: number | null; pot: number | null } {
   if (p.oa !== null && p.oa !== undefined) {
     return { cur: p.oa, pot: p.potOa ?? p.oa };
   }
@@ -271,13 +315,13 @@ orgRoutes.get('/depth-chart/:orgId', (req, res) => {
  * Keying by level costs nothing and it is what the question means: how is he
  * doing where he is now.
  */
-const statKey = (playerId: number, level: number): string => `${playerId}:${level}`;
+export const statKey = (playerId: number, level: number): string => `${playerId}:${level}`;
 
-function seasonBatting(): Map<string, Record<string, number>> {
+export function seasonBatting(): Map<string, Record<string, number>> {
   const t = 'players_career_batting_stats';
   const out = new Map<string, Record<string, number>>();
   if (!tableExists(t)) return out;
-  const year = (db.prepare(`SELECT MAX(year) AS y FROM "${t}"`).get() as { y: number }).y;
+  const year = latestStatsYear().batting;
   const rows = db
     .prepare(
       `SELECT player_id, level_id, SUM(pa) AS pa, SUM(ab) AS ab, SUM(h) AS h, SUM(d) AS d,
@@ -292,11 +336,11 @@ function seasonBatting(): Map<string, Record<string, number>> {
 }
 
 /** Professional lines only, per level, for the same reasons as {@link seasonBatting}. */
-function seasonPitching(): Map<string, Record<string, number>> {
+export function seasonPitching(): Map<string, Record<string, number>> {
   const t = 'players_career_pitching_stats';
   const out = new Map<string, Record<string, number>>();
   if (!tableExists(t)) return out;
-  const year = (db.prepare(`SELECT MAX(year) AS y FROM "${t}"`).get() as { y: number }).y;
+  const year = latestStatsYear().pitching;
   const rows = db
     .prepare(
       `SELECT player_id, level_id, SUM(outs) AS outs, SUM(er) AS er, SUM(bb) AS bb,
@@ -323,13 +367,13 @@ const slashOf = (s: Record<string, number>): { avg: number; obp: number; slg: nu
   };
 };
 
-const ops = (s: Record<string, number>): number | null => {
+export const ops = (s: Record<string, number>): number | null => {
   const line = slashOf(s);
   return line === null ? null : line.obp + line.slg;
 };
 
 /** ".198/.301/.385", the way the Lineup page and the box score write it. */
-const slashLine = (s: Record<string, number>): string | null => {
+export const slashLine = (s: Record<string, number>): string | null => {
   const line = slashOf(s);
   if (line === null) return null;
   const three = (v: number) => v.toFixed(3).replace(/^0\./, '.');
@@ -392,7 +436,7 @@ const POSITION_NAMES: Record<number, string> = {
  * and a gap is the same share of it whichever scale writes it: 5 stays 5 on
  * 20-80 and is about 0.3 on 1-5, and 15 is about 0.9.
  */
-const onScale = (gapOn80: number): number => (gapOn80 * ratingScaleMax()) / 80;
+export const onScale = (gapOn80: number): number => (gapOn80 * ratingScaleMax()) / 80;
 
 /** Within this of his ceiling (20-80 points), he is close to what he will be. */
 const NEAR_CEILING = 5;
@@ -424,37 +468,23 @@ export interface CorrespondingMove {
 /** The 40-man limit, written the way the 40-Man Roster page writes it. */
 export const FORTY_MAN_LIMIT = 40;
 
-/**
- * Options and the five-year line, drawn where server/rosterops.ts draws them
- * for the 40-Man Roster page (it keeps its own copies private): a man who has
- * used all three options and has under five years of service cannot be sent
- * down without clearing waivers, so he is the one a full roster forces out.
- * Past five years he can refuse the assignment anyway, and the missing option
- * costs the club nothing.
- */
-export const OPTIONS_ALLOWED = 3;
-const OPTION_FREE_SERVICE_YEARS = 5;
-
-/** Major-league service in years: exact from the days where the export has them. */
-export const serviceYearsOf = (
-  days: number | null | undefined, years: number | null | undefined
-): number => (typeof days === 'number' ? days / SERVICE_DAYS_PER_YEAR : years ?? 0);
-
-/** Out of options in the sense that binds the club. No count at all means the export does not say. */
-export function outOfOptions(optionsUsed: number | null | undefined, serviceYears: number): boolean {
-  return typeof optionsUsed === 'number' && optionsUsed >= OPTIONS_ALLOWED &&
-    serviceYears < OPTION_FREE_SERVICE_YEARS;
-}
-
 /** How long a man has to be out to go on the 60-day injured list. */
 const SIXTY_DAY_IL = 60;
 
-interface FortyManRoom {
+export interface FortyManRoom {
   /** Places taken, counted the way the 40-Man Roster page counts them. */
   count: number;
   /** Everyone on the 40-man list, the 60-day IL included. */
   on: Set<number>;
+  /** The first of `offList`: the one man who could most cheaply give up his place. */
   comesOff: { player_id: number; name: string; why: string } | null;
+  /**
+   * Everyone who could cheaply give up a place, in the order to use them: the
+   * men out long enough for the 60-day list, then the men out of options, each
+   * lowest grade first. The planner takes one per place it needs, so two
+   * additions never name the same man.
+   */
+  offList: Array<{ player_id: number; name: string; why: string }>;
 }
 
 /**
@@ -476,7 +506,7 @@ interface FortyManRoom {
  * the club values least is the reader's call and not a fact the save holds,
  * so the page says the roster is full and leaves it there.
  */
-function fortyManRoom(orgId: number, players: OrgPlayer[]): FortyManRoom | null {
+export function fortyManRoom(orgId: number, players: OrgPlayer[]): FortyManRoom | null {
   const crunch = rosterCrunch(orgId);
   if (!crunch) return null;
 
@@ -489,7 +519,7 @@ function fortyManRoom(orgId: number, players: OrgPlayer[]): FortyManRoom | null 
       db
         .prepare(
           `SELECT rs.player_id,
-                  ${['is_active', 'is_on_dl', 'is_on_dl60', 'options_used', 'mlb_service_days', 'mlb_service_years']
+                  ${['is_active', 'is_on_dl', 'is_on_dl60', 'options_used', 'options_used_this_year', 'mlb_service_days', 'mlb_service_years']
                     .map(col).join(', ')},
                   ${injury} AS injury_left
            FROM players_roster_status rs JOIN players p ON p.player_id = rs.player_id
@@ -511,18 +541,34 @@ function fortyManRoom(orgId: number, players: OrgPlayer[]): FortyManRoom | null 
     const health = healthOf(d);
     if (health?.status === 'IL' && (health.daysLeft ?? 0) >= SIXTY_DAY_IL) {
       toTheSixty.push({ ...him, why: 'to the 60-day IL' });
-    } else if (outOfOptions(d.options_used, serviceYearsOf(d.mlb_service_days, d.mlb_service_years))) {
+    } else if (
+      /*
+       * Out of options the way optionState() reads it, the one reading the
+       * planner and the 40-Man page share: (3 used, 1 this year) is a last
+       * option year and he can still go up and down until it ends, so he is
+       * not the man a full roster puts in play. A man on the 26 is not named
+       * either: designating him changes the 26 as well, which the call-up
+       * that needs the place already settles on its own.
+       */
+      !m.on26 &&
+      optionState({
+        optionsUsed: d.options_used, optionsUsedThisYear: d.options_used_this_year, on40: true, on26: false,
+        serviceYears: serviceYearsOf(d.mlb_service_days, d.mlb_service_years),
+      }) === 'out-of-options'
+    ) {
       noOptions.push({ ...him, why: 'out of options' });
     }
   }
-  const lowest = (xs: Candidate[]): Candidate | null =>
-    [...xs].sort((a, b) => (a.cur ?? Infinity) - (b.cur ?? Infinity))[0] ?? null;
-  const pick = lowest(toTheSixty) ?? lowest(noOptions);
+  const byGrade = (xs: Candidate[]): Candidate[] =>
+    [...xs].sort((a, b) => (a.cur ?? Infinity) - (b.cur ?? Infinity) || a.player_id - b.player_id);
+  const offList = [...byGrade(toTheSixty), ...byGrade(noOptions)]
+    .map((c) => ({ player_id: c.player_id, name: c.name, why: c.why }));
 
   return {
     count: crunch.counts.fortyMan,
     on: new Set(crunch.fortyMan.map((m) => m.player_id)),
-    comesOff: pick ? { player_id: pick.player_id, name: pick.name, why: pick.why } : null,
+    comesOff: offList[0] ?? null,
+    offList,
   };
 }
 
@@ -634,7 +680,7 @@ function seasonQuote(
  * veteran's grade lead can be undone by what he is doing in the majors this
  * year, which the grade does not see. See {@link whyNotInTheWay}.
  */
-function correspondingMoves(
+export function correspondingMoves(
   orgId: number,
   players: OrgPlayer[],
   batting: Map<string, Record<string, number>>,

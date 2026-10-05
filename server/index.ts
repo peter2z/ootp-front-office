@@ -88,15 +88,18 @@ function requireLocalHost(
 }
 
 /** Import on boot if needed, then watch for fresh OOTP exports. */
-function bootstrapData(): void {
-  const config = loadConfig();
-  if (!config.csvDir || !fs.existsSync(config.csvDir)) return;
-  if (!tableExists('players')) void runImport(config.csvDir);
+export function bootstrapData(): void {
   // Indexes used to be built only by the importer, so upgrading the app left
   // every existing database without them — the same full table scans as before,
   // and an export that took twenty-five minutes with the UI wedged behind it.
-  // Creating them is idempotent and only costs anything the first time.
-  buildIndexes();
+  // Creating them is idempotent and only costs anything the first time, and it
+  // runs whenever there is a league to index, whether or not an export folder
+  // is configured: a database imported by an older version gains the indexes
+  // added since without being re-imported.
+  if (tableExists('players')) buildIndexes('new');
+  const config = loadConfig();
+  if (!config.csvDir || !fs.existsSync(config.csvDir)) return;
+  if (!tableExists('players')) void runImport(config.csvDir);
   if (loadSettings().autoImport) startWatcher(config.csvDir);
   try {
     // Ensure development tracking has a baseline for already-imported data

@@ -102,6 +102,34 @@ export function leagueBaseline(leagueId: number, year: number, level = 1): Leagu
   return baseline;
 }
 
+/**
+ * Lets a caller that has already aggregated a league-season hand the result to
+ * the cache, so the next leagueBaseline() for that key returns it without
+ * touching the database.
+ *
+ * leagueBaseline() runs two SUM queries per league-season, and on a real save
+ * each one measured about 97 ms before the career tables had a (league_id,
+ * year) index. A planner that needs twenty-odd league-seasons at once can
+ * compute them all in one GROUP BY per table and seed them here, which is the
+ * fallback for a database imported before that index existed. The park
+ * factors are filled in when the caller leaves them out, because they come
+ * from a different table and the grouped load has no reason to carry them.
+ */
+export function seedLeagueBaseline(
+  leagueId: number,
+  year: number,
+  level: number,
+  baseline: Omit<LeagueBaseline, 'year' | 'parkFactor'> & Partial<Pick<LeagueBaseline, 'parkFactor'>>
+): LeagueBaseline {
+  const full: LeagueBaseline = {
+    ...baseline,
+    year,
+    parkFactor: baseline.parkFactor ?? parkFactors(leagueId),
+  };
+  baselineCache.set(`${leagueId}:${year}:${level}`, full);
+  return full;
+}
+
 /** Cleared whenever a fresh export is imported. */
 export function clearStatCaches(): void {
   baselineCache.clear();
@@ -190,6 +218,16 @@ export function computePitching(
   // lgERA minus the league's own raw component — not lgERA minus the textbook
   // 3.10. Using the textbook figure inflated every FIP by the difference.
   const fipConstant = base.lgERA > 0 ? base.lgERA - base.lgFIPRaw : 0;
+  // Walks and hit batsmen both count: they are the batter reaching without
+  // the defense being involved, which is the whole point of the metric.
+  const fip = ip
+    ? (13 * g('hra') + 3 * (g('bb') + g('hp')) - 2 * g('k')) / ip + fipConstant
+    : null;
+  // FIP+ mirrors ERA+ : 100 × lgFIP / FIP, and because the constant makes
+  // league FIP equal league ERA the numerator is lgERA, park-lifted the same
+  // way. A FIP at or below zero (a tiny sample of nothing but strikeouts) has
+  // no sensible ratio, so it reads null rather than negative or infinite.
+  const fipPlus = fip !== null && fip > 0 && base.lgERA > 0 ? (100 * base.lgERA * pf) / fip : null;
 
   return {
     g: g('g'), gs: g('gs'), w: g('w'), l: g('l'), sv: g('sv'), hld: g('hld'),
@@ -203,12 +241,9 @@ export function computePitching(
     kbb: g('bb') ? round(g('k') / g('bb'), 2) : g('k') > 0 ? null : null,
     kPct: g('bf') ? round((g('k') / g('bf')) * 100, 1) : null,
     bbPct: g('bf') ? round((g('bb') / g('bf')) * 100, 1) : null,
-    // Walks and hit batsmen both count: they are the batter reaching without
-    // the defense being involved, which is the whole point of the metric.
-    fip: ip
-      ? round((13 * g('hra') + 3 * (g('bb') + g('hp')) - 2 * g('k')) / ip + fipConstant, 2)
-      : null,
+    fip: round(fip, 2),
     eraPlus: round(eraPlus, 0),
+    fipPlus: round(fipPlus, 0),
     war: round(g('war'), 1),
   };
 }

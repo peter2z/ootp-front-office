@@ -8,6 +8,7 @@ import {
 import { RosterPage } from './pages/Roster';
 import { DepthChart } from './pages/DepthChart';
 import { Prospects } from './pages/Prospects';
+import { Planner } from './pages/Planner';
 import { Contracts } from './pages/Contracts';
 import { Payroll } from './pages/Payroll';
 import { FreeAgents } from './pages/FreeAgents';
@@ -85,6 +86,7 @@ const NAV: Array<NavEntry<Page>> = [
     kind: 'group', label: 'Farm System', icon: '🌾',
     items: [
       { page: 'prospects', label: 'Prospects', hint: 'Promotion signals by level' },
+      { page: 'planner', label: 'Org Planner', hint: 'Every level sized and staffed, with the moves to get there' },
       { page: 'development', label: 'Development', hint: 'Rating changes over time' },
     ],
   },
@@ -547,6 +549,7 @@ export function App() {
                 {page === 'rosters' && <RosterPage orgId={orgId} />}
                 {page === 'depth' && <DepthChart orgId={orgId} />}
                 {page === 'prospects' && <Prospects orgId={orgId} onNavigate={go} />}
+                {page === 'planner' && <Planner orgId={orgId} onNavigate={go} />}
                 {page === 'development' && <Development orgId={orgId} />}
                 {page === 'draft' && <Draft orgId={orgId} />}
                 {page === 'franchise' && <Franchise orgId={orgId} />}

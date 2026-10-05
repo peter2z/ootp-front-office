@@ -60,7 +60,7 @@ const EXTRA: Record<string, string> = {
   Notes: 'Contract clauses: team, player, and vesting options, plus no-trade protection.',
   Flags: 'Quick contract markers — expiring, still under team control, options, and no-trade clauses.',
   Recommendation: "The app's own read on the contract, weighing age, remaining years, how good he is now versus his ceiling, and what he costs. It is a starting point for your judgment, not a verdict.",
-  Fit: 'How well this free agent addresses a hole on your roster, comparing his value to what you currently have at that position.',
+  Fit: "On the free-agent page, how well a man addresses a hole on your roster, comparing his value to what you have at that position. On the Org Planner, how ready a man is for a level, as a signed number: positive means he belongs there or above, negative that he is overmatched. It blends OOTP's Overall against the median man at that level, his production translated to that level, and his age against the level's median; zero is the bar for a promotion, and half a point above it moves him now.",
 
   // ── Roster mechanics ───────────────────────────────────────────────────
   Status: 'Roster status — active, on an option to the minors, on the injured list, or exposed to waivers.',
@@ -83,6 +83,15 @@ const EXTRA: Record<string, string> = {
 
   Rk: 'Rank within this list.',
   Signal: "The app's read on whether this player is ready for a promotion, is worth watching, or needs more time — driven by his performance relative to his level and his age relative to his peers.",
+
+  // ── Organization Planner ───────────────────────────────────────────────
+  Rung: "One step of the organisation's ladder: MLB, AAA, AA, High-A, Single-A, the complex club, the DSL, and the international complex pool below it. Built from each league's reputation, so High-A and Single-A are told apart even though OOTP gives them the same level number.",
+  'Production index': 'One number for up to three seasons of production, 100 = average for the level it is quoted at: wRC+ for hitters, the mean of ERA+ and FIP+ for pitchers, each season measured against its own league and translated one level at a time. Regressed to 100 on 150 PA or 40 IP, and only readable once the three-season window holds that much.',
+  'Service cap': "The most pro service years a league lets a man carry on its rosters (OOTP's standard table: 3 at the rookie complex, 4 in the DSL and Single-A, 5 at High-A, none at AA or AAA). The game does not export the limit, so it is set in Settings → Planner; a man over it is an invalid roster.",
+  'Last eligible season': 'The season a man is at his level’s service cap: he may finish it there but must open next year at a higher level. The planner dates that move to the last game of his league’s season.',
+  'Utility class': 'What jobs a man can hold, read from the positions the game has revealed and his pitching ratings: C, IF, OF, super (infield and outfield), bat-only (1B/DH), everyday (one spot); for arms SP, swing, RP or CL.',
+  'Asset class': 'The release-or-trade classification. Core is a man with a 55 ceiling or a 50 now under 31; prospect has a 45 ceiling, room to grow and is young for his level; depth grades near the level’s median; surplus is none of those, or old for the level with no growth left. Only surplus men are moved for roster size alone.',
+  Hold: 'A move a rule refused, kept visible with its refusal: out of options, a full 40-man, a poor season with a meaningful sample. Nothing to do, but worth knowing why nothing can be done.',
 
   // ── Misc ───────────────────────────────────────────────────────────────
   'Why here': 'The reason this player landed in this lineup slot.',

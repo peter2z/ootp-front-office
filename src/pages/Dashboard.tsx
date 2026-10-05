@@ -111,8 +111,19 @@ interface DashboardData {
     crunchIssues: number;
     /** Optional: a save imported before this existed has no count to show. */
     tradeTalk?: number;
+    /**
+     * The Org Planner's open decisions: forced, call-up, protect, demote,
+     * trade, release and hold, after dismissals and the season's horizon fold.
+     * Null when the planner could not run, so the chip can say so rather
+     * than read as nothing to decide.
+     */
+    planMoves?: number | null;
+    planBreakdown?: PlanBreakdown | null;
   };
 }
+
+/** What the Org moves count is made of, by kind. */
+export type PlanBreakdown = Partial<Record<string, number>>;
 
 interface Briefing {
   generatedAt?: string;
@@ -225,6 +236,14 @@ export function Dashboard({ orgId, onNavigate }: {
           count={data.pending.farmSignals}
           title={farmBreakdownTitle(data.pending.farmBreakdown)}
           onClick={() => onNavigate('prospects', { signal: 'decision' })}
+        />
+        {/* The open moves of the decision kinds, so it opens the page on them;
+            the page's own horizon and Open filter are the chip's fold */}
+        <DecisionChip
+          label="Org moves"
+          count={data.pending.planMoves ?? null}
+          title={data.pending.planMoves == null ? PLANNER_FAILED : planBreakdownTitle(data.pending.planBreakdown ?? undefined)}
+          onClick={() => onNavigate('planner', { kind: 'decision' })}
         />
         <DecisionChip label="Trade talk" count={data.pending.tradeTalk ?? 0} onClick={() => onNavigate('trades')} />
         <DecisionChip label="Roster issues" count={data.pending.crunchIssues} onClick={() => onNavigate('crunch')} />
@@ -455,12 +474,33 @@ export function farmBreakdownTitle(
   return b ? `${b.promote} promote · ${b.blocked} blocked · ${b.demote} demote` : undefined;
 }
 
-function DecisionChip({
+/**
+ * What the Org moves count is made of, for the chip's hover text: "2 forced ·
+ * 3 protect · 1 trade". Only the kinds with men in them, in the planner's own
+ * order, so the text says what the page will show first. Undefined when the
+ * planner sent nothing or counted nobody, so the chip gets no empty title.
+ */
+export function planBreakdownTitle(b: PlanBreakdown | undefined): string | undefined {
+  if (!b) return undefined;
+  const parts = ['forced', 'callup', 'protect', 'demote', 'trade', 'release', 'hold']
+    .filter((kind) => (b[kind] ?? 0) > 0)
+    .map((kind) => `${b[kind]} ${kind === 'callup' ? 'call-up' : kind}`);
+  return parts.length ? parts.join(' · ') : undefined;
+}
+
+/** The Org moves chip's hover text when there is no count to give. */
+export const PLANNER_FAILED = 'The planner could not run on this save, so there is no count; the Org Planner page says why.';
+
+/**
+ * One count and the page it opens. A null count is one that could not be
+ * worked out: it reads "—", never 0, which would say there is nothing to do.
+ */
+export function DecisionChip({
   label, count, onClick, title,
-}: { label: string; count: number; onClick: () => void; title?: string }) {
+}: { label: string; count: number | null; onClick: () => void; title?: string }) {
   return (
-    <button className={`decision-chip ${count > 0 ? 'has-items' : ''}`} onClick={onClick} title={title}>
-      <span className="decision-count">{count}</span>
+    <button className={`decision-chip ${count !== null && count > 0 ? 'has-items' : ''}`} onClick={onClick} title={title}>
+      <span className="decision-count">{count ?? '—'}</span>
       <span>{label}</span>
     </button>
   );

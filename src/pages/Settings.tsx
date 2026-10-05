@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import {
-  apiDelete, apiGet, apiPost, desktopBridge, exportStaticSite, getExportProgress, triggerImport,
-  type ExportProgress, type Org, type SaveInfo, type SiteExportResult, type Status,
+  apiDelete, apiGet, apiPost, desktopBridge, exportStaticSite, getExportProgress, getPlan, putPlannerSettings,
+  triggerImport,
+  type ExportProgress, type Org, type PlannerSettings, type SaveInfo, type SiteExportResult, type Status,
 } from '../api';
 import { FolderPicker } from '../FolderPicker';
 import { UpdatePanel } from '../Updater';
@@ -40,6 +41,8 @@ export interface AppSettings {
   autoGenerateAfterImport: boolean;
   /** Where a local Ollama is listening. Ignored by every other provider. */
   ollamaUrl: string;
+  /** The Org Planner's size bands, service caps and complex rules. Absent from a server older than it. */
+  planner?: PlannerSettings;
 }
 interface SettingsResponse {
   settings: AppSettings;
@@ -139,6 +142,34 @@ export function Settings({
     setData({ ...data, settings: next });
     onSettingsChanged(next);
     await apiPost('/api/settings', patch);
+  };
+
+  /*
+   * The planner block has its own route, which checks what it is sent (a
+   * minimum above its maximum, a cap of nought) and saves nothing when a
+   * value is wrong. So it is written optimistically like the rest, and when
+   * the server refuses, the block goes back to what the server holds and says
+   * why — rather than showing a number that was never kept.
+   */
+  const [plannerError, setPlannerError] = useState<string | null>(null);
+  const updatePlanner = async (patch: Partial<PlannerSettings>) => {
+    if (!data?.settings.planner) return;
+    const was = data.settings.planner;
+    const next: PlannerSettings = {
+      ...was,
+      ...patch,
+      targets: { ...was.targets, ...(patch.targets ?? {}) },
+      serviceCaps: { ...was.serviceCaps, ...(patch.serviceCaps ?? {}) },
+    };
+    setData({ ...data, settings: { ...data.settings, planner: next } });
+    setPlannerError(null);
+    try {
+      const r = await putPlannerSettings(patch);
+      setData((d) => (d ? { ...d, settings: { ...d.settings, planner: r.planner } } : d));
+    } catch (e) {
+      setPlannerError((e as Error).message);
+      setData((d) => (d ? { ...d, settings: { ...d.settings, planner: was } } : d));
+    }
   };
 
   /*
@@ -634,8 +665,238 @@ export function Settings({
         </div>
       </section>
 
+      {settings.planner && (
+        <PlannerBlock
+          planner={settings.planner}
+          orgId={orgId}
+          error={plannerError}
+          onChange={updatePlanner}
+        />
+      )}
+
       <UpdatePanel />
       <ReleaseNotes />
     </div>
+  );
+}
+
+/** The rung keys a cap can be set for, top to bottom, as the server's table has them. */
+const CAP_RUNGS = ['aaa', 'aa', 'high-a', 'single-a', 'complex', 'dsl'] as const;
+const RUNG_NAMES: Record<string, string> = {
+  aaa: 'AAA', aa: 'AA', 'high-a': 'High-A', 'single-a': 'Single-A', complex: 'Complex', dsl: 'DSL',
+};
+
+/** What a settings number field does with what was typed, once the reader leaves it. */
+export type NumberEntry =
+  | { kind: 'save'; next: number | null }
+  | { kind: 'keep' }
+  | { kind: 'refuse'; message: string };
+
+/**
+ * Reads a typed figure against the field's bounds. Out of range or not a
+ * whole number is refused with the bound in the sentence, and not saved:
+ * putting the old value back without a word made a typed 0 cap or a band of
+ * 61 simply vanish.
+ */
+export function readNumberEntry(text: string, value: number | null, min: number, max: number, allowBlank = false): NumberEntry {
+  const trimmed = text.trim();
+  const range = `a whole number from ${min} to ${max}${allowBlank ? ', or blank for none' : ''}`;
+  if (trimmed === '') {
+    if (!allowBlank) return { kind: 'refuse', message: `Not saved: this needs ${range}.` };
+    return value === null ? { kind: 'keep' } : { kind: 'save', next: null };
+  }
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < min || n > max) return { kind: 'refuse', message: `${trimmed} is not saved: this takes ${range}.` };
+  return n === value ? { kind: 'keep' } : { kind: 'save', next: n };
+}
+
+/**
+ * A number that is saved when the reader is done with it, not on every
+ * keystroke: typing "3" on the way to "30" would otherwise be sent as a
+ * minimum of 3 and refused. Blank is allowed where the caller says so, which
+ * is how a cap is lifted. A figure outside the bounds is put back and the
+ * bound said beside the field.
+ */
+function NumberField({
+  value, min, max, label, allowBlank, onCommit,
+}: {
+  value: number | null;
+  min: number;
+  max: number;
+  label: string;
+  allowBlank?: boolean;
+  onCommit: (next: number | null) => void;
+}) {
+  const [text, setText] = useState(value === null ? '' : String(value));
+  const [refused, setRefused] = useState<string | null>(null);
+  const noteId = useId();
+  // A save elsewhere (or the server putting a refused value back) shows here
+  useEffect(() => setText(value === null ? '' : String(value)), [value]);
+  const commit = () => {
+    const entry = readNumberEntry(text, value, min, max, allowBlank);
+    if (entry.kind === 'refuse') {
+      setRefused(entry.message);
+      setText(value === null ? '' : String(value));
+      return;
+    }
+    setRefused(null);
+    if (entry.kind === 'save') onCommit(entry.next);
+  };
+  return (
+    <>
+      <input
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        step={1}
+        value={text}
+        aria-label={label}
+        placeholder={allowBlank ? 'none' : undefined}
+        aria-invalid={refused !== null || undefined}
+        aria-describedby={refused ? noteId : undefined}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+        style={{ width: 72 }}
+      />
+      {refused && <span id={noteId} className="field-note tone-bad" role="alert">{refused}</span>}
+    </>
+  );
+}
+
+/**
+ * The Org Planner's targets and rules. One global block keyed by rung, with
+ * the labels of the current save's clubs where the plan can give them, so an
+ * FCL organisation sees its own club's name against the `complex` row.
+ */
+function PlannerBlock({ planner, orgId, error, onChange }: {
+  planner: PlannerSettings;
+  orgId: number | null;
+  error: string | null;
+  onChange: (patch: Partial<PlannerSettings>) => void;
+}) {
+  const [labels, setLabels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (orgId === null) return;
+    // The names are a courtesy; a save the planner cannot read still shows the rung keys
+    getPlan(orgId)
+      .then((plan) => {
+        const found: Record<string, string> = {};
+        for (const level of plan.levels) found[level.rung] = level.label;
+        setLabels(found);
+      })
+      .catch(() => setLabels({}));
+  }, [orgId]);
+
+  const bands: Array<{ key: keyof PlannerSettings['targets']; label: string; hint: string }> = [
+    { key: 'fullSeason', label: 'Full-season clubs', hint: 'AAA, AA, High-A and Single-A, each' },
+    { key: 'complex', label: 'Complex club', hint: 'The ACL or FCL club' },
+    { key: 'dsl', label: 'DSL clubs', hint: 'Each DSL club' },
+  ];
+
+  return (
+    <section className="settings-block">
+      <h2>Planner</h2>
+      <p className="muted hint-line">
+        What the Org Planner sizes each level to and the rules it will not break. The game does
+        not export its per-league service limits, so the caps ship as OOTP&rsquo;s standard table —
+        check League Settings in OOTP if yours differ.
+      </p>
+      {error && <div className="banner error">{error}</div>}
+
+      {bands.map((b) => (
+        <div className="settings-row" key={b.key}>
+          <div>
+            <strong>{b.label}</strong>
+            <div className="muted">{b.hint}. The minimum is enforced; the maximum only warns, and only surplus men are moved for size.</div>
+          </div>
+          <div className="settings-actions">
+            <label className="muted">
+              min{' '}
+              <NumberField
+                value={planner.targets[b.key].min}
+                min={20}
+                max={60}
+                label={`${b.label} minimum`}
+                onCommit={(n) => onChange({ targets: { ...planner.targets, [b.key]: { ...planner.targets[b.key], min: n ?? planner.targets[b.key].min } } })}
+              />
+            </label>
+            <label className="muted">
+              max (soft){' '}
+              <NumberField
+                value={planner.targets[b.key].max}
+                min={20}
+                max={60}
+                label={`${b.label} soft maximum`}
+                onCommit={(n) => onChange({ targets: { ...planner.targets, [b.key]: { ...planner.targets[b.key], max: n ?? planner.targets[b.key].max } } })}
+              />
+            </label>
+          </div>
+        </div>
+      ))}
+
+      <div className="settings-row">
+        <div>
+          <strong>Service caps</strong>
+          <div className="muted">
+            The most pro service years a man may carry at each level; blank means no cap. A man at the
+            cap is in his last eligible season there, and the planner dates his move up.
+          </div>
+          <table className="mini">
+            <tbody>
+              {CAP_RUNGS.map((rung) => (
+                <tr key={rung}>
+                  <td><span className="level-tag">{RUNG_NAMES[rung]}</span></td>
+                  <td>{labels[rung] ?? rung}</td>
+                  <td className="num">
+                    <NumberField
+                      value={planner.serviceCaps[rung] ?? null}
+                      min={1}
+                      max={10}
+                      allowBlank
+                      label={`${RUNG_NAMES[rung]} service cap`}
+                      onCommit={(n) => onChange({ serviceCaps: { [rung]: n } })}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="settings-row">
+        <div>
+          <strong>International complex</strong>
+          <div className="muted">
+            OOTP moves a complex man up at this age; the planner recommends it a year earlier. The size
+            is how many men the pool holds before the scout finds nobody.
+          </div>
+        </div>
+        <div className="settings-actions">
+          <label className="muted">
+            age{' '}
+            <NumberField
+              value={planner.icMaxAge}
+              min={17}
+              max={25}
+              label="International complex age limit"
+              onCommit={(n) => { if (n !== null) onChange({ icMaxAge: n }); }}
+            />
+          </label>
+          <label className="muted">
+            size{' '}
+            <NumberField
+              value={planner.icSize}
+              min={10}
+              max={200}
+              label="International complex size"
+              onCommit={(n) => { if (n !== null) onChange({ icSize: n }); }}
+            />
+          </label>
+        </div>
+      </div>
+    </section>
   );
 }

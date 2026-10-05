@@ -1,7 +1,7 @@
 import { Router, type Request } from 'express';
 import { db, DATE_KEY, tableColumns, tableExists } from './db.js';
-import { SERVICE_DAYS_PER_YEAR } from './contracts.js';
 import { LEVEL_NAMES, rosterHoles, scaleGrade, seasonYear } from './valuation.js';
+import { optionState, rule5Eligible, rule5ProtectGate, serviceYearsOf } from './rosterRules.js';
 
 export const rosterOpsRoutes = Router();
 
@@ -11,16 +11,6 @@ const POSITION_NAMES: Record<number, string> = {
 const teamLabel = `CASE WHEN t.name = t.nickname THEN t.name ELSE t.name || ' ' || t.nickname END`;
 
 // ── Roster crunch (40-man / options / Rule 5 / DFA) ─────────────────────
-
-/** Options a man is given. Use all three and he can no longer be sent down for free. */
-const OPTIONS_ALLOWED = 3;
-
-/**
- * Past this much major-league service a man cannot be sent down against his
- * will, so having no options left costs the club nothing with him. Under it,
- * it is exactly what forces a designation when the roster is full.
- */
-const OPTION_FREE_SERVICE_YEARS = 5;
 
 export interface CrunchPlayer {
   player_id: number;
@@ -35,7 +25,14 @@ export interface CrunchPlayer {
   /** Said beside him on the 40-man list when there is something to say. */
   note: string | null;
   optionsUsed: number;
+  /** The length of his Rule 5 protection in pro service years, as the export carries it. */
   rule5Protected: number;
+  /**
+   * The Rule 5 facts, on every row. Eligibility is a fact about most of a farm
+   * (115 of the Dodgers' 324) and is shown as a flag; only a man the protect
+   * gate passes gets an issue line, so the Roster issues chip stays readable.
+   */
+  rule5: { eligible: boolean; protectRecommended: boolean };
   issues: string[];
 }
 
@@ -48,9 +45,13 @@ export interface RosterCrunch {
     il60: number;
     /** Exactly the length of `issues`, which is what "Needs attention" shows. */
     issues: number;
+    /** Men the Rule 5 draft can take this winter; the length of `rule5Eligible`. */
+    rule5Eligible: number;
   };
   issues: CrunchPlayer[];
   fortyMan: CrunchPlayer[];
+  /** Every Rule 5 eligible man, the ones worth a 40-man place first. */
+  rule5Eligible: CrunchPlayer[];
 }
 
 /**
@@ -74,18 +75,31 @@ export function rosterCrunch(orgId: number): RosterCrunch | null {
    */
   const have = new Set(tableColumns('players_roster_status'));
   const status = [
-    'is_active', 'is_on_secondary', 'is_on_dl', 'is_on_dl60', 'options_used',
+    'is_active', 'is_on_secondary', 'is_on_dl', 'is_on_dl60', 'options_used', 'options_used_this_year',
     'years_protected_from_rule_5', 'pro_service_years', 'mlb_service_years', 'mlb_service_days',
     'designated_for_assignment', 'days_on_dfa_left', 'is_on_waivers', 'days_on_waivers_left',
   ].map((c) => (have.has(c) ? `rs.${c}` : `NULL AS ${c}`));
 
+  /*
+   * OOTP's own grades, for the Rule 5 protect gate: the exact ones where the
+   * save carries them, the rounded ones otherwise (the org pages' order of
+   * preference), and nothing on a save without the table — where the gate
+   * then recommends nobody, since it does not rest on a blank.
+   */
+  const grades = new Set(tableColumns('players_value'));
+  const gradeOf = (exact: string, rounded: string) =>
+    grades.has(exact) ? `v.${exact}` : grades.has(rounded) ? `v.${rounded}` : 'NULL';
+  const valueJoin = grades.size ? 'LEFT JOIN players_value v ON v.player_id = p.player_id' : '';
+
   const rows = db
     .prepare(
       `SELECT p.player_id, p.first_name || ' ' || p.last_name AS name, p.age, p.position,
-              t.level, ${status.join(', ')}
+              t.level, ${status.join(', ')},
+              ${gradeOf('oa', 'oa_rating')} AS oa, ${gradeOf('pot', 'pot_rating')} AS pot
        FROM players p
        JOIN players_roster_status rs ON rs.player_id = p.player_id
        JOIN teams t ON t.team_id = p.team_id
+       ${valueJoin}
        WHERE p.organization_id = ? AND p.retired = 0`
     )
     .all(orgId) as Array<Record<string, number | string | null>>;
@@ -106,38 +120,55 @@ export function rosterCrunch(orgId: number): RosterCrunch | null {
       on26 || r.is_on_secondary === 1 ||
       ((r.is_on_dl === 1 || il60) && r.level === 1);
     const optionsUsed = (r.options_used as number) ?? 0;
-    const usedAllOptions = optionsUsed >= OPTIONS_ALLOWED;
-    // Days are exact; mlb_service_years is truncated to a whole year
-    const service =
-      typeof r.mlb_service_days === 'number'
-        ? r.mlb_service_days / SERVICE_DAYS_PER_YEAR
-        : (r.mlb_service_years as number | null) ?? 0;
     /*
-     * A man on the 26 with every option used.
+     * Where he stands on options, read by the one function the planner reads
+     * (rosterRules.ts), so the two cannot disagree about a man.
      *
-     * This was only ever raised for men already in the minors (`!on26`), which
-     * is backwards: the one it matters for is on the big club, because he
+     * A man on the 26 with every option used is the one it matters for: he
      * cannot be sent down without clearing waivers and so is the man a full
-     * roster forces out. In one save 255 active players had all three options
-     * used and not one carried a flag; on the Dodgers that was Phillips, Snell,
-     * Okert and Anderson.
+     * roster forces out. This was only ever raised for men already in the
+     * minors (`!on26`), which is backwards; in one save 255 active players had
+     * all three options used and not one carried a flag — on the Dodgers that
+     * was Phillips, Snell, Okert and Anderson. Under five years of service
+     * only: past that a man can refuse the assignment, so of those four only
+     * Anderson, at 3.78 years, is a real constraint. It is a heads-up and not
+     * a violation: it changes neither the active nor the 40-man count.
      *
-     * Under five years of service only. Past that a man can refuse the
-     * assignment, so of those four only Anderson, at 3.78 years, is a real
-     * constraint. It is a heads-up and not a violation: it changes neither the
-     * active nor the 40-man count.
+     * In the minors the page warns of a last option year as well, since that
+     * is the year the club has to decide. A man at five years in the minors is
+     * there by consent and gets no line.
      */
-    const activeOutOfOptions = on26 && usedAllOptions && service < OPTION_FREE_SERVICE_YEARS;
-    const outOfOptions = on40 && !on26 && usedAllOptions;
+    const options = optionState({
+      optionsUsed: r.options_used as number | null,
+      optionsUsedThisYear: r.options_used_this_year as number | null,
+      on40,
+      on26,
+      // Days are exact; mlb_service_years is truncated to a whole year
+      serviceYears: serviceYearsOf(r.mlb_service_days as number | null, r.mlb_service_years as number | null),
+    });
     const rule5Protected = (r.years_protected_from_rule_5 as number) ?? 0;
-    const rule5Exposed = !on40 && rule5Protected <= 0 && ((r.pro_service_years as number) ?? 0) >= 4;
+    /*
+     * Rule 5, read the right way round. The protection column is a length (4
+     * or 5 years) and not a countdown, so the old test `protected <= 0` found
+     * one man on a farm where 115 were eligible. Eligibility goes on the row
+     * as a flag for every man; the issue line is reserved for the ones the
+     * protect gate passes, judged here on grade alone — the page has no
+     * production index, and the planner, which does, applies the same gate
+     * with it.
+     */
+    const eligible = rule5Eligible({
+      on40, proServiceYears: r.pro_service_years as number | null, protectedYears: rule5Protected,
+    });
+    const protectRecommended = eligible &&
+      rule5ProtectGate({ oa: r.oa as number | null, pot: r.pot as number | null, productionIndex: null });
     const issues: string[] = [];
     if (r.designated_for_assignment === 1) issues.push(`DFA — ${r.days_on_dfa_left ?? '?'} days to resolve`);
     if (r.is_on_waivers === 1) issues.push(`on waivers — ${r.days_on_waivers_left ?? '?'} days left`);
-    if (activeOutOfOptions) issues.push('Out of options: cannot be sent down without clearing waivers');
-    else if (outOfOptions) issues.push('out of options');
-    else if (on40 && !on26 && optionsUsed === 2) issues.push('last option year');
-    if (rule5Exposed) issues.push('Rule 5 exposed');
+    if (on26) {
+      if (options === 'out-of-options') issues.push('Out of options: cannot be sent down without clearing waivers');
+    } else if (options === 'out-of-options') issues.push('out of options');
+    else if (options === 'last-option-year') issues.push('last option year');
+    if (protectRecommended) issues.push('Rule 5: worth a 40-man place');
     return {
       player_id: r.player_id as number,
       name: r.name as string,
@@ -150,6 +181,7 @@ export function rosterCrunch(orgId: number): RosterCrunch | null {
       note: on40 && il60 ? 'IL-60, does not count' : null,
       optionsUsed,
       rule5Protected,
+      rule5: { eligible, protectRecommended },
       issues,
     };
   });
@@ -160,6 +192,11 @@ export function rosterCrunch(orgId: number): RosterCrunch | null {
   withIssues.sort((a, b) => b.issues.length - a.issues.length);
   // The men who count first, active ahead of the rest, then the ones who do not
   const place = (p: CrunchPlayer): number => (p.il60 ? 2 : p.on26 ? 0 : 1);
+  // The ones worth a place lead; the rest in a fixed order, so two reads agree
+  const exposed = players
+    .filter((p) => p.rule5.eligible)
+    .sort((a, b) =>
+      Number(b.rule5.protectRecommended) - Number(a.rule5.protectRecommended) || a.player_id - b.player_id);
 
   return {
     counts: {
@@ -167,9 +204,11 @@ export function rosterCrunch(orgId: number): RosterCrunch | null {
       fortyMan: counted.length,
       il60: listed.length - counted.length,
       issues: withIssues.length,
+      rule5Eligible: exposed.length,
     },
     issues: withIssues,
     fortyMan: listed.sort((a, b) => place(a) - place(b)),
+    rule5Eligible: exposed,
   };
 }
 

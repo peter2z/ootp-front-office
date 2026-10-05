@@ -534,3 +534,25 @@ describe('the controls that were only a glyph', () => {
     }
   });
 });
+
+describe('the Org Planner', () => {
+  const planner = read('src/pages/Planner.tsx');
+
+  it('names no element that has no role to carry a name', () => {
+    // A name on a plain div or span is dropped by screen readers: the
+    // deadlines strip was one, and is now a list
+    for (const found of planner.matchAll(/<(div|span)\b[^>]*\saria-label=/g)) {
+      const tag = planner.slice(found.index, planner.indexOf('>', found.index) + 1);
+      expect(tag, 'a generic element with a name').toMatch(/\srole="/);
+    }
+    expect(planner).toMatch(/<ul className="plan-deadlines" aria-label="Deadlines">/);
+  });
+
+  it('gives each row action the move it acts on, with the visible word first', () => {
+    for (const word of ['Accept', 'Dismiss']) {
+      expect(planner).toContain(`aria-label={\`${word} \${name}\`}`);
+    }
+    expect(planner).toContain('aria-label={`${undo} ${name}`}');
+    expect(planner).toContain('aria-label={`Steps for ${moveName(m)}`}');
+  });
+});

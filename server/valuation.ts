@@ -36,6 +36,10 @@ export const ON_ROSTER = '(rs.is_active = 1 OR rs.is_on_dl = 1 OR rs.is_on_dl60 
 
 /** OOTP's role code for a starting pitcher. */
 export const ROLE_STARTER = 11;
+/** OOTP's role code for a reliever who is not the closer. */
+export const ROLE_RELIEVER = 12;
+/** OOTP's role code for the closer. */
+export const ROLE_CLOSER = 13;
 
 export interface LeagueRules {
   /** Service years needed for free agency; 0 means the league has none. */

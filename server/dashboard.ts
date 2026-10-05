@@ -9,6 +9,9 @@ import { computeContracts, isExtensionAction } from './contracts.js';
 import { computeProspects } from './org.js';
 import { rosterCrunch } from './rosterops.js';
 import { probableStarters } from './schedule.js';
+import { computePlan, decisionOnCard } from './planner.js';
+import { planDecisions } from './plandecisions.js';
+import type { MoveKind } from './planTypes.js';
 
 export const dashboardRoutes = Router();
 
@@ -498,6 +501,7 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
    * above a page that read 6.
    */
   const crunchIssues = rosterCrunch(orgId)?.counts.issues ?? 0;
+  const plan = planMoveCounts(orgId);
 
   res.json({
     standings,
@@ -526,6 +530,61 @@ dashboardRoutes.get('/dashboard/:orgId', (req, res) => {
       injuredCount: injuries.length,
       crunchIssues,
       tradeTalk,
+      // Null, not absent, when the planner could not run: the chip then reads
+      // "—" and says why, rather than a 0 that reads as nothing to decide
+      planMoves: plan ? plan.total : null,
+      planBreakdown: plan ? plan.byKind : null,
     },
   });
 });
+
+/**
+ * The kinds the Org Planner's chip counts: the ones that ask for a decision.
+ * Promote, send-down, cover and assign are the other half of a call-up or a
+ * forced move and would count the same man twice.
+ */
+export const PLAN_DECISION_KINDS: readonly MoveKind[] = ['forced', 'callup', 'protect', 'demote', 'trade', 'release', 'hold'];
+
+/**
+ * Which horizon the planner page opens on, from the game's own calendar: the
+ * moves dated now until August, and everything once the offseason is in sight.
+ * The page makes the same choice (defaultHorizon in src/pages/Planner.tsx), so
+ * the chip counts what the page lists when it opens.
+ */
+export function planHorizonFold(gameDate: string): 'now' | 'all' {
+  const month = Number(gameDate.split('-')[1]);
+  return Number.isFinite(month) && month >= 8 ? 'all' : 'now';
+}
+
+/**
+ * What the "Org moves" chip shows: the plan's open moves of the decision
+ * kinds, after the user's dismissals and acceptances and after the horizon
+ * fold. Read from the same plan the page draws, so the two cannot disagree.
+ * Null when the planner cannot run on this save — the chip then says it has
+ * no count, rather than the morning report being lost with it.
+ */
+export function planMoveCounts(orgId: number): { total: number; byKind: Partial<Record<MoveKind, number>> } | null {
+  try {
+    const plan = computePlan(orgId);
+    if (!plan) return null;
+    const decided = planDecisions(orgId);
+    const fold = planHorizonFold(plan.gameDate);
+    const byKind: Partial<Record<MoveKind, number>> = {};
+    let total = 0;
+    for (const move of plan.moves) {
+      if (!PLAN_DECISION_KINDS.includes(move.kind)) continue;
+      if (fold === 'now' && move.horizon !== 'now') continue;
+      // Open means no decision rides on the card, by the overlay's own rule:
+      // nobody has said anything about it yet, or what was said was settled
+      // by an import (done, or moot), or settled as not done against an
+      // earlier deadline than the one the card asks about now
+      if (move.decision.state !== 'open' || decisionOnCard(move, decided.get(move.key))) continue;
+      byKind[move.kind] = (byKind[move.kind] ?? 0) + 1;
+      total += 1;
+    }
+    return { total, byKind };
+  } catch (err) {
+    console.error('[dashboard] the planner could not count its moves:', err);
+    return null;
+  }
+}

@@ -1,9 +1,8 @@
 import Database from 'better-sqlite3';
 import { Router } from 'express';
 import path from 'node:path';
-import { db as leagueDb, tableExists } from './db.js';
+import { DATE_KEY, db as leagueDb, tableExists } from './db.js';
 import { DATA_DIR, loadConfig } from './config.js';
-import { DATE_KEY } from './dashboard.js';
 import { POSITION_NAMES } from './valuation.js';
 
 /**
@@ -94,11 +93,13 @@ historyDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_notes_player ON player_notes (save_name, player_id);
 `);
 
-function currentSaveName(): string {
+/** The save every row in this database is keyed by; the planner's decisions use it too. */
+export function currentSaveName(): string {
   return loadConfig().saveName ?? 'unknown';
 }
 
-function leagueGameDate(): string | null {
+/** The big league's current date in OOTP's unpadded form, or null before any import. */
+export function leagueGameDate(): string | null {
   try {
     const row = leagueDb
       .prepare(
@@ -107,6 +108,58 @@ function leagueGameDate(): string | null {
       )
       .get() as { d: string } | undefined;
     return row?.d ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The big league's Opening Day for the season the export is in, unpadded as
+ * OOTP writes it, or null when the export does not carry one. Read from the
+ * same league row as `leagueGameDate`, falling back to any top-level league
+ * that has a start date. The planner's decision store closes an offseason
+ * move's window with it.
+ */
+export function leagueOpeningDay(): string | null {
+  try {
+    const cols = new Set(
+      (leagueDb.prepare(`PRAGMA table_info(leagues)`).all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!cols.has('start_date')) return null;
+    const rows = leagueDb
+      .prepare(
+        `SELECT start_date AS d FROM leagues WHERE league_id IN
+         (SELECT DISTINCT league_id FROM teams WHERE level = 1)`
+      )
+      .all() as Array<{ d: string | null }>;
+    const first = leagueDb
+      .prepare(
+        `SELECT start_date AS d FROM leagues WHERE league_id IN
+         (SELECT DISTINCT league_id FROM teams WHERE level = 1) LIMIT 1`
+      )
+      .get() as { d: string | null } | undefined;
+    const clean = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    return clean(first?.d) ?? rows.map((r) => clean(r.d)).find((d) => d !== null) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A club's name as the planner prints it: "Tulsa Drillers", or just the name
+ * when OOTP repeats it as the nickname. Null for no club, or a club the
+ * export does not list.
+ */
+export function clubLabelOf(teamId: number | null): string | null {
+  if (teamId === null) return null;
+  try {
+    const row = leagueDb.prepare(`SELECT * FROM teams WHERE team_id = ?`).get(teamId) as
+      | { name?: string | null; nickname?: string | null }
+      | undefined;
+    const name = row?.name?.trim();
+    if (!name) return null;
+    const nickname = row?.nickname?.trim();
+    return !nickname || nickname === name ? name : `${name} ${nickname}`;
   } catch {
     return null;
   }

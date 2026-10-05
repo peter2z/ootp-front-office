@@ -277,6 +277,7 @@ describe('the pages', () => {
     { file: 'pages/Lineup.tsx', key: 'lineup', reads: 'data' },
     { file: 'pages/Pitching.tsx', key: 'pitching', reads: 'data' },
     { file: 'pages/Prospects.tsx', key: 'prospects', reads: 'data' },
+    { file: 'pages/Planner.tsx', key: 'planner', reads: 'plan' },
   ];
 
   /** What sits between the tags, which is the part of a page the note folds away. */

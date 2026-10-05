@@ -1,5 +1,7 @@
 import { db, tableExists } from './db.js';
 import { computeBatting, computePitching, leagueBaseline } from './stats.js';
+// org.ts imports this module too; the cycle is safe because neither reads the other at load
+import { latestStatsYear } from './org.js';
 
 /**
  * How a man is actually playing this season, in one league-relative number.
@@ -145,13 +147,30 @@ export function formDoubtsValue(
  * own pitching screen.
  */
 export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
-  const out = new Map<number, SeasonForm>();
-  if (!tableExists('players') || !tableExists('teams')) return out;
+  return seasonFormByClubs([teamId]).get(teamId) ?? new Map();
+}
 
-  const team = db.prepare(`SELECT league_id, level FROM teams WHERE team_id = ?`).get(teamId) as
-    | { league_id: number; level: number }
-    | undefined;
-  if (!team) return out;
+/**
+ * {@link seasonFormByPlayer} for several clubs at once, keyed by club: each
+ * club's men at that club's own level, against that club's own league-season
+ * baseline, exactly as one call per club would give them.
+ *
+ * The planner asks for every club in an organisation, eight of them, and one
+ * call apiece walked the season's stats eight times over; this walks them
+ * once, the club and its level riding along on each line. A club the teams
+ * table does not know is left out, as the single call returns nothing for it.
+ */
+export function seasonFormByClubs(teamIds: readonly number[]): Map<number, Map<number, SeasonForm>> {
+  const result = new Map<number, Map<number, SeasonForm>>();
+  if (!tableExists('players') || !tableExists('teams')) return result;
+  const ids = [...new Set(teamIds)];
+  if (ids.length === 0) return result;
+  const marks = ids.map(() => '?').join(', ');
+
+  const teams = db
+    .prepare(`SELECT team_id, league_id, level FROM teams WHERE team_id IN (${marks})`)
+    .all(...ids) as Array<{ team_id: number; league_id: number; level: number }>;
+  if (teams.length === 0) return result;
 
   /*
    * The season, from whichever table has one. Reading it off the pitching
@@ -160,34 +179,37 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
    * no pitching lines at all, and this would have quietly returned nothing for
    * the whole club rather than the batting it did have.
    */
-  const years = [
-    tableExists('players_career_pitching_stats')
-      ? (db.prepare(`SELECT MAX(year) AS y FROM players_career_pitching_stats`).get() as { y: number | null }).y
-      : null,
-    tableExists('players_career_batting_stats')
-      ? (db.prepare(`SELECT MAX(year) AS y FROM players_career_batting_stats`).get() as { y: number | null }).y
-      : null,
-  ].filter((y): y is number => y !== null);
-  if (years.length === 0) return out;
+  const latest = latestStatsYear();
+  const years = [latest.pitching, latest.batting].filter((y): y is number => y !== null);
+  if (years.length === 0) return result;
   const year = Math.max(...years);
 
-  const base = leagueBaseline(team.league_id, year, team.level);
+  // In the order asked for, so each club's map is filled as its own call would fill it
+  const known = new Map(teams.map((t) => [t.team_id, t]));
+  const clubs = ids.filter((id) => known.has(id)).map((id) => known.get(id)!);
+  const bases = new Map(clubs.map((c) => [c.team_id, leagueBaseline(c.league_id, year, c.level)]));
+  const out = new Map(clubs.map((c) => [c.team_id, new Map<number, SeasonForm>()]));
+  const clubMarks = clubs.map(() => '?').join(', ');
+  const clubIds = clubs.map((c) => c.team_id);
 
   if (tableExists('players_career_pitching_stats')) {
     const rows = db
       .prepare(
-        `SELECT s.player_id, SUM(s.outs) AS outs, SUM(s.er) AS er, SUM(s.ha) AS ha,
+        `SELECT p.team_id AS club, s.player_id, SUM(s.outs) AS outs, SUM(s.er) AS er, SUM(s.ha) AS ha,
                 SUM(s.bb) AS bb, SUM(s.k) AS k, SUM(s.hra) AS hra, SUM(s.hp) AS hp,
                 SUM(s.bf) AS bf, SUM(s.g) AS g, SUM(s.gs) AS gs, SUM(s.w) AS w,
                 SUM(s.l) AS l, SUM(s.s) AS sv, SUM(s.hld) AS hld, SUM(s.war) AS war
          FROM players_career_pitching_stats s
          JOIN players p ON p.player_id = s.player_id
-         WHERE s.year = ? AND s.split_id = 1 AND s.level_id = ? AND p.team_id = ?
-         GROUP BY s.player_id`
+         JOIN teams t ON t.team_id = p.team_id
+         WHERE s.year = ? AND s.split_id = 1 AND s.level_id = t.level AND p.team_id IN (${clubMarks})
+         GROUP BY s.player_id
+         ORDER BY s.player_id`
       )
-      .all(year, team.level, teamId) as Array<Record<string, number>>;
+      .all(year, ...clubIds) as Array<Record<string, number>>;
     for (const row of rows) {
-      const stats = computePitching(row, base, teamId);
+      const teamId = row.club;
+      const stats = computePitching(row, bases.get(teamId)!, teamId);
       const meaningful = (row.outs ?? 0) >= MEANINGFUL_OUTS;
       const index = stats.eraPlus ?? null;
       const innings = Math.round(((row.outs ?? 0) / 3) * 10) / 10;
@@ -195,7 +217,7 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
       // Better to leave it out than to print a dash in the middle of a line
       // somebody is going to read aloud.
       const era = stats.era !== null && stats.era !== undefined ? stats.era.toFixed(2) : null;
-      out.set(row.player_id, {
+      out.get(teamId)!.set(row.player_id, {
         index,
         meaningful,
         line: [
@@ -213,21 +235,25 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
   if (tableExists('players_career_batting_stats')) {
     const rows = db
       .prepare(
-        `SELECT s.player_id, SUM(s.pa) AS pa, SUM(s.ab) AS ab, SUM(s.h) AS h, SUM(s.d) AS d,
+        `SELECT p.team_id AS club, s.player_id, SUM(s.pa) AS pa, SUM(s.ab) AS ab, SUM(s.h) AS h, SUM(s.d) AS d,
                 SUM(s.t) AS t3, SUM(s.hr) AS hr, SUM(s.bb) AS bb, SUM(s.ibb) AS ibb,
                 SUM(s.hp) AS hp, SUM(s.sf) AS sf, SUM(s.k) AS k, SUM(s.r) AS r,
                 SUM(s.rbi) AS rbi, SUM(s.sb) AS sb, SUM(s.cs) AS cs, SUM(s.war) AS war
          FROM players_career_batting_stats s
          JOIN players p ON p.player_id = s.player_id
-         WHERE s.year = ? AND s.split_id = 1 AND s.level_id = ? AND p.team_id = ? AND p.position <> 1
-         GROUP BY s.player_id`
+         JOIN teams t ON t.team_id = p.team_id
+         WHERE s.year = ? AND s.split_id = 1 AND s.level_id = t.level AND p.team_id IN (${clubMarks})
+           AND p.position <> 1
+         GROUP BY s.player_id
+         ORDER BY s.player_id`
       )
-      .all(year, team.level, teamId) as Array<Record<string, number>>;
+      .all(year, ...clubIds) as Array<Record<string, number>>;
     for (const row of rows) {
-      const stats = computeBatting(row, base, teamId);
+      const teamId = row.club;
+      const stats = computeBatting(row, bases.get(teamId)!, teamId);
       const meaningful = (row.pa ?? 0) >= MEANINGFUL_PA;
       const index = stats.wrcPlus ?? null;
-      out.set(row.player_id, {
+      out.get(teamId)!.set(row.player_id, {
         index,
         meaningful,
         line: [
@@ -242,5 +268,6 @@ export function seasonFormByPlayer(teamId: number): Map<number, SeasonForm> {
     }
   }
 
-  return out;
+  for (const [teamId, forms] of out) result.set(teamId, forms);
+  return result;
 }

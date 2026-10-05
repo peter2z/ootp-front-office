@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeAll } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { db } from '../server/db.js';
 import { rosterCrunch } from '../server/rosterops.js';
+import { RosterCrunchView, type CrunchData } from '../src/pages/RosterCrunch.js';
 import request from './request.js';
 import { IDS } from './fixture.js';
 
@@ -43,8 +46,11 @@ const MAN = {
   farmNoOptions: 7009,
   farmLastYear: 7010,
   designated: 7011,
+  /** Rule 5 eligible (5 pro years against 4 of protection) with a 52 ceiling: worth a 40-man place. */
   unprotected: 7012,
   depth: 7013,
+  /** Rule 5 eligible too (4 against 4), but a 40 ceiling: the flag and no line. */
+  exposedDepth: 7014,
 } as const;
 
 const DAYS = 172;
@@ -121,18 +127,36 @@ function addClub(): void {
     secondary: 1, options: 3, dfa: 1, dfaLeft: 4, years: 1, days: DAYS,
   });
   // In the minors and off the 40-man
-  man(MAN.unprotected, 'Exposed', FARM, { protectedYears: 0, proYears: 5, years: 0, days: 0 });
+  man(MAN.unprotected, 'Exposed', FARM, { protectedYears: 4, proYears: 5, years: 0, days: 0 });
   man(MAN.depth, 'Depth', FARM, { years: 0, days: 0 });
+  man(MAN.exposedDepth, 'Exposeddepth', FARM, { protectedYears: 4, proYears: 4, years: 0, days: 0 });
+
+  /*
+   * OOTP's grades, for the Rule 5 protect gate: the ceiling decides whether an
+   * eligible man gets a line or only the flag. The protection column is a
+   * length and not a countdown, so the exposed man is now a five-year man
+   * protected for four rather than one "protected for zero".
+   */
+  const grade = db.prepare(
+    `INSERT INTO players_value
+       (player_id, overall_value, talent_value, offensive_value, offensive_value_vsl,
+        offensive_value_vsr, pitching_value, oa_rating, pot_rating, oa, pot)
+     VALUES (?, 100, 100, 100, 100, 100, 100, ?, ?, ?, ?)`
+  );
+  grade.run(MAN.unprotected, 40, 50, 39, 52);
+  grade.run(MAN.exposedDepth, 40, 40, 38, 40);
 }
 
 interface Man {
   player_id: number; name: string; on26: boolean; on40: boolean; il60: boolean;
   note: string | null; issues: string[];
+  rule5: { eligible: boolean; protectRecommended: boolean };
 }
 interface Crunch {
-  counts: { active: number; fortyMan: number; il60: number; issues: number };
+  counts: { active: number; fortyMan: number; il60: number; issues: number; rule5Eligible: number };
   issues: Man[];
   fortyMan: Man[];
+  rule5Eligible: Man[];
 }
 
 const crunch = async (): Promise<Crunch> => (await request(`/api/roster-crunch/${ORG}`)) as Crunch;
@@ -282,9 +306,19 @@ describe('the flags that were already there', () => {
     expect(him?.issues).toEqual(['last option year']);
   });
 
-  it('still raises Rule 5 exposure for an unprotected man off the 40-man', async () => {
+  it('raises Rule 5 for an eligible man off the 40-man who is worth a place', async () => {
     const him = find((await crunch()).issues, MAN.unprotected);
-    expect(him?.issues).toEqual(['Rule 5 exposed']);
+    expect(him?.issues).toEqual(['Rule 5: worth a 40-man place']);
+    expect(him?.rule5).toEqual({ eligible: true, protectRecommended: true });
+  });
+
+  it('gives an eligible man under the protect gate the flag and no line', async () => {
+    const d = await crunch();
+    expect(find(d.issues, MAN.exposedDepth), 'a 40 ceiling is not worth a 40-man place').toBeUndefined();
+    const him = find(d.rule5Eligible, MAN.exposedDepth);
+    expect(him?.rule5).toEqual({ eligible: true, protectRecommended: false });
+    expect(him?.issues).toEqual([]);
+    expect(d.counts.rule5Eligible).toBe(2);
   });
 
   it('keeps the order: most trouble first, and each man\'s own list as it was', async () => {
@@ -318,5 +352,62 @@ describe('what the page and the dashboard are given', () => {
   it('is one function, so the dashboard cannot count something else', async () => {
     // The route is a thin wrapper over the function the dashboard calls
     expect(rosterCrunch(ORG)).toEqual(await crunch());
+  });
+});
+
+describe('the chips on the page', () => {
+  /*
+   * Each chip is a span, and two spans with nothing between them copy and read
+   * aloud as one run of words: "Rule 5: worth a 40-man placeRule 5 eligible".
+   * The page is drawn here from the route's own answer, the way the browser
+   * gets it, and read as markup and as the text a copy or a screen reader has.
+   */
+  const page = async (edit: (d: Crunch) => Crunch = (d) => d): Promise<string> =>
+    renderToStaticMarkup(createElement(RosterCrunchView, { data: edit(await crunch()) as unknown as CrunchData, protects: null }));
+  /** The markup under one heading, up to the next. */
+  const section = (html: string, heading: string): string => {
+    const at = html.indexOf(`<h2>${heading}</h2>`);
+    expect(at, `no "${heading}" section`).toBeGreaterThan(-1);
+    const next = html.indexOf('<h2>', at + 1);
+    return html.slice(at, next === -1 ? undefined : next);
+  };
+  /** One man's row, found by his whole name, so "Exposed" is not "Exposeddepth". */
+  const rowOf = (html: string, name: string): string =>
+    (html.match(/<tr>[\s\S]*?<\/tr>/g) ?? []).find((r) => r.includes(`>${name}<`)) ?? '';
+  /** The last cell of a row as text, tags gone and spaces kept. */
+  const lastCell = (row: string): string => {
+    const cells = row.match(/<td[^>]*>[\s\S]*?<\/td>/g) ?? [];
+    return (cells[cells.length - 1] ?? '').replace(/<[^>]*>/g, '');
+  };
+
+  it('puts a space between a man\'s last issue and his Rule 5 flag', async () => {
+    const row = rowOf(section(await page(), '⚠ Needs Attention'), 'Crunch Exposed');
+    expect(row, 'the unprotected man is not under Needs Attention').not.toBe('');
+    expect(row).toContain('Rule 5: worth a 40-man place</span> <span class="flag">Rule 5 eligible</span>');
+    expect(lastCell(row)).toBe('Rule 5: worth a 40-man place Rule 5 eligible');
+  });
+
+  it('keeps that space after the last of several issues', async () => {
+    // Give him a second issue, as a man in his last option year would carry
+    const html = await page((d) => ({
+      ...d,
+      issues: d.issues.map((p) => (p.player_id === MAN.unprotected ? { ...p, issues: ['last option year', ...p.issues] } : p)),
+    }));
+    expect(lastCell(rowOf(section(html, '⚠ Needs Attention'), 'Crunch Exposed')))
+      .toBe('last option year Rule 5: worth a 40-man place Rule 5 eligible');
+  });
+
+  it('puts a space between the flag and "worth a 40-man place" in the Rule 5 list', async () => {
+    const list = section(await page(), 'Rule 5 eligible');
+    const row = rowOf(list, 'Crunch Exposed');
+    expect(row).toContain('Rule 5 eligible</span> <span class="flag flag-hot">Rule 5: worth a 40-man place</span>');
+    expect(lastCell(row)).toBe('Rule 5 eligible Rule 5: worth a 40-man place');
+    // A man the gate does not pass has the flag alone, with nothing hanging off it
+    expect(lastCell(rowOf(list, 'Crunch Exposeddepth'))).toBe('Rule 5 eligible');
+  });
+
+  it('adds no space where there is no flag to follow the issues', async () => {
+    const row = rowOf(section(await page(), '⚠ Needs Attention'), 'Crunch Designated');
+    expect(lastCell(row)).toBe('DFA — 4 days to resolve out of options');
   });
 });

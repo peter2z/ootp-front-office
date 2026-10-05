@@ -145,6 +145,10 @@ export async function exportSite(orgId: number): Promise<ExportResult> {
     `injuries/${orgId}`, `leaderboards/${orgId}`, `roster-crunch/${orgId}`, `staff/${orgId}`,
     `free-agents/${orgId}`, `storylines/${orgId}`, `briefing/${orgId}`, `trade/fits/${orgId}`,
     `next-game/${orgId}`, `pitching/${orgId}`, `schedule/${orgId}`, `trends/${orgId}`,
+    // The whole plan, decided moves included: the page fetches this one address
+    // and filters it client-side, so a host that drops query strings serves
+    // the same plan the dev server does
+    `plan/${orgId}?show=all`,
     // A static host drops query strings, so each lineup combination is its own file
     ...['r', 'l'].flatMap((vs) =>
       ['saber', 'trad'].flatMap((style) =>

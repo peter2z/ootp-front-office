@@ -5,8 +5,11 @@ import { DATA_DIR, loadConfig } from './config.js';
 import {
   DEFAULT_MODEL, OLLAMA_DEFAULT_URL, PROVIDERS, isProviderId, providerFor, type ProviderId,
 } from './providers.js';
+import { isRungKey, type PlannerSettings, type RungTargets } from './planTypes.js';
 import { forgetUnusable } from './unusable.js';
 import { startWatcher, stopWatcher } from './watcher.js';
+
+export type { PlannerSettings, RungTargets } from './planTypes.js';
 
 /**
  * User preferences, plus the Anthropic API key.
@@ -75,6 +78,18 @@ export interface Settings {
    * first thing to check when nothing answers.
    */
   ollamaUrl: string;
+  /**
+   * What the Organization Planner plans toward: the size band per club, the
+   * pro-service ceiling per level, and the international complex rules.
+   *
+   * Settings rather than constants because OOTP does not export its per-league
+   * service limit — the defaults are its standard table, which a league with
+   * custom limits would plan against wrongly until corrected — and because the
+   * band is the user's own number ("at least 28-30"). One object keyed by rung,
+   * not by club, so an org with an FCL club and a user running two orgs edit it
+   * once.
+   */
+  planner: PlannerSettings;
 }
 
 const DEFAULTS: Settings = {
@@ -90,7 +105,89 @@ const DEFAULTS: Settings = {
   theme: 'system',
   model: 'claude-opus-5',
   ollamaUrl: OLLAMA_DEFAULT_URL,
+  planner: {
+    // The full-season maximum is soft and ships at 35, not 30: a hard 30 would
+    // push 22 men out of the user's four clubs and leave them thinner than
+    // every AI club in the league (list-1 medians run 38 at AA and A)
+    targets: { fullSeason: { min: 28, max: 35 }, complex: { min: 32, max: 45 }, dsl: { min: 30, max: 45 } },
+    // OOTP's standard table, which is also every ceiling observed on the save
+    // this was built against: nobody at 4+ years at the complex, 5+ at
+    // Single-A, 6+ at High-A, and no ceiling at AA or AAA
+    serviceCaps: { aaa: null, aa: null, 'high-a': 5, 'single-a': 4, complex: 3, dsl: 4 },
+    icMaxAge: 20,
+    icSize: 50,
+  },
 };
+
+/** The rung keys a service cap may be set for: everything below the big club and above the complex pool. */
+const CAPPED_RUNGS: readonly string[] = ['aaa', 'aa', 'high-a', 'single-a', 'complex', 'dsl'];
+const TARGET_KEYS = ['fullSeason', 'complex', 'dsl'] as const;
+/** Every field the planner block has; anything else in a PUT is a slip and is refused by name. */
+const PLANNER_KEYS = ['targets', 'serviceCaps', 'icMaxAge', 'icSize'] as const;
+
+const isWhole = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+/** The bounds a PUT enforces, shared with the read of a stored block so a hand edit cannot slip past them. */
+const bandOk = (b: RungTargets): boolean => isWhole(b.min) && isWhole(b.max) && b.min >= 20 && b.max <= 60 && b.min <= b.max;
+const capOk = (c: unknown): c is number | null => c === null || (isWhole(c) && c >= 1 && c <= 10);
+const icAgeOk = (v: unknown): v is number => isWhole(v) && v >= 17 && v <= 25;
+const icSizeOk = (v: unknown): v is number => isWhole(v) && v >= 10 && v <= 200;
+
+/**
+ * The stored planner block laid over the defaults, one level deep.
+ *
+ * `loadSettings` spreads the file over DEFAULTS at the top level only, which is
+ * right for a flat setting and wrong for this one: a settings.json written by
+ * hand, or by a build that knew fewer fields, would replace the whole block
+ * and leave a target or a cap undefined — and an undefined cap reads as
+ * uncapped, which is the one mistake that produces an invalid roster.
+ */
+function mergePlanner(base: PlannerSettings, patch: unknown): PlannerSettings {
+  const p = (patch && typeof patch === 'object' ? patch : {}) as Partial<PlannerSettings>;
+  /*
+   * Each stored field goes through the same bounds the PUT applies, and one
+   * that fails falls back to its default on its own: a cap of 0 typed into
+   * settings.json would otherwise reach the engine, which no PUT allows.
+   */
+  const targets = { ...base.targets };
+  for (const key of TARGET_KEYS) {
+    const band = p.targets?.[key];
+    if (!band || typeof band !== 'object') continue;
+    const merged = { ...base.targets[key], ...band };
+    if (bandOk(merged)) targets[key] = merged;
+  }
+  const serviceCaps = { ...base.serviceCaps };
+  if (p.serviceCaps && typeof p.serviceCaps === 'object') {
+    for (const rung of CAPPED_RUNGS) {
+      const cap = (p.serviceCaps as Record<string, unknown>)[rung];
+      if (cap !== undefined && capOk(cap)) serviceCaps[rung as keyof typeof serviceCaps] = cap;
+    }
+  }
+  return {
+    targets,
+    serviceCaps,
+    icMaxAge: icAgeOk(p.icMaxAge) ? p.icMaxAge : base.icMaxAge,
+    icSize: icSizeOk(p.icSize) ? p.icSize : base.icSize,
+  };
+}
+
+/** The planner block as the engine should read it, every field present. */
+export function plannerSettings(): PlannerSettings {
+  return loadSettings().planner;
+}
+
+/**
+ * Who wants to know when the planner settings change.
+ *
+ * The engine caches a plan per org until the next import, and a new size band
+ * or cap makes every cached plan wrong — so the engine registers its
+ * `clearPlanCache` here and the PUT below calls it. A callback rather than an
+ * import because the engine imports this module for the settings themselves,
+ * and the other direction would be a cycle.
+ */
+const plannerSettingsHooks: Array<() => void> = [];
+export function onPlannerSettingsChanged(fn: () => void): void {
+  plannerSettingsHooks.push(fn);
+}
 
 /** Which service the AI features talk to. */
 export function activeProvider(): ProviderId {
@@ -121,7 +218,8 @@ const KEY_PATH = path.join(DATA_DIR, 'credentials.json');
 
 export function loadSettings(): Settings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')) };
+    const stored = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')) as Partial<Settings>;
+    return { ...DEFAULTS, ...stored, planner: mergePlanner(DEFAULTS.planner, stored.planner) };
   } catch {
     return { ...DEFAULTS };
   }
@@ -310,6 +408,90 @@ settingsRoutes.put('/next-season-budget/:orgId', (req, res) => {
   else next[orgId] = amount;
   writeSettings({ ...current, nextSeasonBudget: next });
   res.json({ ok: true, nextSeasonBudget: amount });
+});
+
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+
+/**
+ * Checks a partial planner block against the one in force and returns the
+ * merged block, or the sentence that explains why nothing was saved.
+ *
+ * Every rule is checked before anything is written, so a body with one bad
+ * cap in it changes nothing at all — half a save would leave the engine
+ * planning against a band it was never shown. The bounds are wide (a band of
+ * 20 to 60, caps of 1 to 10, an age of 17 to 25, a pool of 10 to 200) because
+ * their job is to catch a slip of the keyboard, not to second-guess a league.
+ */
+function validatePlanner(body: unknown, current: PlannerSettings): { planner: PlannerSettings } | { error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'Send an object with targets, serviceCaps, icMaxAge or icSize.' };
+  const b = body as Record<string, unknown>;
+  // A misspelt field ("icsize") would otherwise answer 200 and change nothing
+  for (const key of Object.keys(b)) {
+    if (!(PLANNER_KEYS as readonly string[]).includes(key)) {
+      return { error: `Unknown planner setting "${key}"; use targets, serviceCaps, icMaxAge or icSize.` };
+    }
+  }
+  const next: PlannerSettings = {
+    targets: { ...current.targets },
+    serviceCaps: { ...current.serviceCaps },
+    icMaxAge: current.icMaxAge,
+    icSize: current.icSize,
+  };
+
+  if (b.targets !== undefined) {
+    if (!b.targets || typeof b.targets !== 'object' || Array.isArray(b.targets)) return { error: 'targets must be an object.' };
+    for (const [key, band] of Object.entries(b.targets as Record<string, unknown>)) {
+      if (!(TARGET_KEYS as readonly string[]).includes(key)) return { error: `Unknown target "${key}"; use fullSeason, complex or dsl.` };
+      if (!band || typeof band !== 'object' || Array.isArray(band)) return { error: `targets.${key} must be an object with min and max.` };
+      const merged: RungTargets = { ...current.targets[key as keyof PlannerSettings['targets']] };
+      for (const side of ['min', 'max'] as const) {
+        const value = (band as Record<string, unknown>)[side];
+        if (value === undefined) continue;
+        if (!isInt(value)) return { error: `targets.${key}.${side} must be a whole number.` };
+        merged[side] = value;
+      }
+      if (merged.min < 20 || merged.max > 60) return { error: `targets.${key} must sit between 20 and 60 men.` };
+      if (merged.min > merged.max) return { error: `targets.${key}: the minimum (${merged.min}) is above the maximum (${merged.max}).` };
+      next.targets[key as keyof PlannerSettings['targets']] = merged;
+    }
+  }
+
+  if (b.serviceCaps !== undefined) {
+    if (!b.serviceCaps || typeof b.serviceCaps !== 'object' || Array.isArray(b.serviceCaps)) return { error: 'serviceCaps must be an object keyed by rung.' };
+    for (const [rung, cap] of Object.entries(b.serviceCaps as Record<string, unknown>)) {
+      if (!isRungKey(rung) || !CAPPED_RUNGS.includes(rung)) {
+        return { error: `Unknown rung "${rung}"; service caps are set for ${CAPPED_RUNGS.join(', ')}.` };
+      }
+      if (cap !== null && (!isInt(cap) || cap < 1 || cap > 10)) {
+        return { error: `serviceCaps.${rung} must be null (uncapped) or a whole number from 1 to 10.` };
+      }
+      next.serviceCaps[rung] = cap as number | null;
+    }
+  }
+
+  if (b.icMaxAge !== undefined) {
+    if (!isInt(b.icMaxAge) || b.icMaxAge < 17 || b.icMaxAge > 25) return { error: 'icMaxAge must be a whole number from 17 to 25.' };
+    next.icMaxAge = b.icMaxAge;
+  }
+  if (b.icSize !== undefined) {
+    if (!isInt(b.icSize) || b.icSize < 10 || b.icSize > 200) return { error: 'icSize must be a whole number from 10 to 200.' };
+    next.icSize = b.icSize;
+  }
+  return { planner: next };
+}
+
+/**
+ * The planner's targets and rules. A partial body merges into what is saved;
+ * a body that fails any check saves nothing and says which field.
+ */
+settingsRoutes.put('/planner-settings', (req, res) => {
+  const current = loadSettings();
+  const checked = validatePlanner(req.body, current.planner);
+  if ('error' in checked) return res.status(400).json({ ok: false, error: checked.error });
+  writeSettings({ ...current, planner: checked.planner });
+  // Every cached plan was computed against the old band or cap
+  for (const fn of plannerSettingsHooks) fn();
+  res.json({ ok: true, planner: checked.planner });
 });
 
 settingsRoutes.post('/settings', (req, res) => {

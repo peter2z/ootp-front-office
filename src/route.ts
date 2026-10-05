@@ -36,6 +36,7 @@ export const PAGES = [
   'dashboard', 'newspaper', 'recap', 'transactions', 'rosters', 'depth', 'prospects', 'development', 'draft',
   'franchise', 'orgcompare', 'contracts', 'crunch', 'injuries', 'freeagents', 'trades', 'lineup', 'leaders',
   'staff', 'watchlist', 'players', 'standings', 'pitching', 'schedule', 'payroll', 'trends', 'settings',
+  'planner',
 ] as const;
 
 export type Page = (typeof PAGES)[number];
